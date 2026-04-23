@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --black: #000000;
+  --ivory: #f1ebdc;
+  --ivory-muted: #aca38f;
+}
+
+.ivory-glow {
+  text-shadow:
+    0 0 10px rgba(241, 235, 220, 0.1),
+    0 0 22px rgba(241, 235, 220, 0.06);
+  filter: drop-shadow(0 0 12px rgba(241, 235, 220, 0.04));
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--ivory);
+  background-color: var(--black);
+  font-family: var(--font-body), sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 300;
+}
