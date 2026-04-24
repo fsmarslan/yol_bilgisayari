@@ -35,6 +35,7 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
@@ -44,7 +45,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="tr">
-      <body className={`${displayFont.variable} ${bodyFont.variable}`}>
+      <body className={`${displayFont.variable} ${bodyFont.variable} bg-black text-[var(--ivory)]`}>
         {children}
       </body>
     </html>

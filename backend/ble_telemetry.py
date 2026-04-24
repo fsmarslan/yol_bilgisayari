@@ -17,8 +17,11 @@ WRITE_CHAR_UUID = os.getenv("BLE_WRITE_UUID", "0000fff2-0000-1000-8000-00805f9b3
 NOTIFY_CHAR_UUID = os.getenv("BLE_NOTIFY_UUID", "0000fff1-0000-1000-8000-00805f9b34fb")
 SCAN_TIMEOUT_SECONDS = float(os.getenv("BLE_SCAN_TIMEOUT", "8"))
 RECONNECT_DELAY_SECONDS = float(os.getenv("BLE_RECONNECT_DELAY", "2"))
+MAX_RECONNECT_DELAY_SECONDS = float(os.getenv("BLE_MAX_RECONNECT_DELAY", "60"))
 COMMAND_TIMEOUT_SECONDS = float(os.getenv("BLE_COMMAND_TIMEOUT", "1.2"))
 POLL_INTERVAL_SECONDS = float(os.getenv("BLE_POLL_INTERVAL", "0.25"))
+IDLE_POLL_INTERVAL_SECONDS = float(os.getenv("BLE_IDLE_POLL_INTERVAL", "2.5"))
+MOVING_POLL_INTERVAL_SECONDS = float(os.getenv("BLE_MOVING_POLL_INTERVAL", "0.35"))
 
 AIR_FUEL_RATIO = 14.7
 FUEL_DENSITY_G_PER_L = 740.0
@@ -75,16 +78,22 @@ class BleTelemetryManager:
             self._latest.update(kwargs)
 
     async def _run_forever(self) -> None:
+        reconnect_delay = RECONNECT_DELAY_SECONDS
+
         while not self._stop_event.is_set():
             try:
                 await self._run_session()
+                reconnect_delay = RECONNECT_DELAY_SECONDS
             except Exception as exc:
                 logger.warning("BLE session hata: %s", exc)
                 await self._set_state(connected=False, last_error=str(exc))
 
-            if self._stop_event.is_set():
-                break
-            await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+                if self._stop_event.is_set():
+                    break
+
+                logger.info("BLE yeniden baglanma beklemesi: %.1fs", reconnect_delay)
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2.0, MAX_RECONNECT_DELAY_SECONDS)
 
     async def _run_session(self) -> None:
         device = await self._resolve_device()
@@ -92,7 +101,7 @@ class BleTelemetryManager:
             msg = "OBD BLE cihazi bulunamadi"
             logger.warning(msg)
             await self._set_state(connected=False, last_error=msg)
-            return
+            raise RuntimeError(msg)
 
         logger.info("BLE baglaniyor: %s (%s)", device.name or "Unknown", device.address)
 
@@ -109,9 +118,12 @@ class BleTelemetryManager:
 
                 while client.is_connected and not self._stop_event.is_set():
                     started = asyncio.get_running_loop().time()
-                    await self._poll_once(client)
+                    speed = await self._poll_once(client)
                     elapsed = asyncio.get_running_loop().time() - started
-                    await asyncio.sleep(max(0.0, POLL_INTERVAL_SECONDS - elapsed))
+                    await asyncio.sleep(max(0.0, self._poll_interval_for_speed(speed) - elapsed))
+
+                if not self._stop_event.is_set() and not client.is_connected:
+                    raise ConnectionError("BLE baglantisi koptu")
             finally:
                 await self._set_state(connected=False)
                 try:
@@ -176,7 +188,7 @@ class BleTelemetryManager:
                 logger.debug("AT komutunda soru isareti dondu: %s -> %s", cmd, response)
             await asyncio.sleep(0.05)
 
-    async def _poll_once(self, client: BleakClient) -> None:
+    async def _poll_once(self, client: BleakClient) -> Optional[float]:
         rpm = await self._query_pid(client, "010C", "0C", self._parse_rpm)
         speed = await self._query_pid(client, "010D", "0D", self._parse_speed)
         coolant = await self._query_pid(client, "0105", "05", self._parse_coolant)
@@ -209,12 +221,27 @@ class BleTelemetryManager:
             last_error=None,
         )
 
+        return speed
+
     async def _query_pid(self, client: BleakClient, command: str, pid_hex: str, parser) -> Optional[float]:
         raw = await self._send_command(client, command)
         payload = self._extract_payload(raw, pid_hex)
         if payload is None:
             return None
         return parser(payload)
+
+    @staticmethod
+    def _poll_interval_for_speed(speed_kmh: Optional[float]) -> float:
+        if speed_kmh is None:
+            return POLL_INTERVAL_SECONDS
+
+        if speed_kmh <= 0.5:
+            return IDLE_POLL_INTERVAL_SECONDS
+
+        if speed_kmh < 20.0:
+            return max(MOVING_POLL_INTERVAL_SECONDS, POLL_INTERVAL_SECONDS)
+
+        return MOVING_POLL_INTERVAL_SECONDS
 
     @staticmethod
     def _extract_payload(raw_text: str, pid_hex: str) -> Optional[list[int]]:
