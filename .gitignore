@@ -15,5 +15,14 @@ out/
 !.env.example
 !.env.local.example
 
+# Android & Capacitor
+frontend/android/.gradle/
+frontend/android/app/build/
+frontend/android/build/
+frontend/android/local.properties
+frontend/android/.idea/
+frontend/android/captures/
+frontend/android/gradleBuild/
+
 # macOS
 .DS_Store
