@@ -1,12 +1,13 @@
 "use client";
 
-import { animate, motion } from "framer-motion";
+import { animate, motion, AnimatePresence } from "framer-motion";
 import useSWR from "swr";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { obdBleService, type TelemetryState } from "./services/obd-ble.service";
 
 type DashboardTab = "surus" | "trip" | "performans" | "motor" | "saglik";
+type CockpitTheme = "cyber-cyan" | "gr-red" | "amber" | "emerald";
 
 type ScreenWakeLock = {
   release: () => Promise<void>;
@@ -81,15 +82,16 @@ const DEFAULT_PERF: PerformanceData = {
 const STORAGE_KEY_TRIP = "auradrive_trip_v3";
 const STORAGE_KEY_PERF = "auradrive_perf_v3";
 const STORAGE_KEY_FUEL_PRICE = "auradrive_fuel_price_v3";
+const STORAGE_KEY_THEME = "auradrive_cockpit_theme";
 const DEFAULT_FUEL_PRICE = 44.5; // TL / Litre (Euro Diesel)
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8001";
 
-const dashboardTabs: Array<{ id: DashboardTab; label: string }> = [
-  { id: "surus", label: "SÜRÜŞ" },
-  { id: "trip", label: "TRİP" },
-  { id: "performans", label: "PERFORMANS" },
-  { id: "motor", label: "MOTOR" },
-  { id: "saglik", label: "SAĞLIK" },
+const dashboardTabs: Array<{ id: DashboardTab; label: string; icon: string }> = [
+  { id: "surus", label: "SÜRÜŞ", icon: "⚡" },
+  { id: "trip", label: "TRİP", icon: "📊" },
+  { id: "performans", label: "DRAG", icon: "⏱️" },
+  { id: "motor", label: "MOTOR", icon: "⚙️" },
+  { id: "saglik", label: "SAĞLIK", icon: "🩺" },
 ];
 
 const fetcher = async (url: string): Promise<LiveData> => {
@@ -133,10 +135,10 @@ function SmoothNumber({
   }, [value, fast]);
 
   if (value === null || value === undefined || Number.isNaN(value)) {
-    return <span>{fallback}</span>;
+    return <span className="tabular-nums">{fallback}</span>;
   }
 
-  return <span>{display.toFixed(digits)}</span>;
+  return <span className="tabular-nums">{display.toFixed(digits)}</span>;
 }
 
 function formatTrip(ms: number) {
@@ -148,15 +150,9 @@ function formatTrip(ms: number) {
 }
 
 function formatTimestamp(value: string | null) {
-  if (!value) {
-    return "--";
-  }
-
+  if (!value) return "--";
   const timestamp = new Date(value);
-  if (Number.isNaN(timestamp.getTime())) {
-    return "--";
-  }
-
+  if (Number.isNaN(timestamp.getTime())) return "--";
   return new Intl.DateTimeFormat("tr-TR", {
     hour: "2-digit",
     minute: "2-digit",
@@ -164,20 +160,25 @@ function formatTimestamp(value: string | null) {
   }).format(timestamp);
 }
 
+function estimateGear(speedKmh: number | null, rpm: number | null): string {
+  if (!speedKmh || !rpm || speedKmh < 3 || rpm < 600) return "N";
+  const ratio = speedKmh / rpm;
+  if (ratio < 0.0115) return "1";
+  if (ratio < 0.020) return "2";
+  if (ratio < 0.031) return "3";
+  if (ratio < 0.043) return "4";
+  return "5";
+}
+
 function useLandscape() {
   const [isLandscape, setIsLandscape] = useState(false);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(orientation: landscape)");
-
-    const updateOrientation = () => {
-      setIsLandscape(mediaQuery.matches);
-    };
-
+    const updateOrientation = () => setIsLandscape(mediaQuery.matches);
     updateOrientation();
     mediaQuery.addEventListener("change", updateOrientation);
     window.addEventListener("resize", updateOrientation);
-
     return () => {
       mediaQuery.removeEventListener("change", updateOrientation);
       window.removeEventListener("resize", updateOrientation);
@@ -185,6 +186,195 @@ function useLandscape() {
   }, []);
 
   return isLandscape;
+}
+
+// ----------------------------------------------------
+// RADIAL ARC GAUGE COMPONENT (SVG Cockpit Gauge)
+// ----------------------------------------------------
+function RadialGauge({
+  value,
+  min = 0,
+  max = 200,
+  title,
+  unit,
+  size = 220,
+  strokeWidth = 10,
+  redlineStart = null,
+  highlightColor = "var(--theme-primary)",
+  subValue,
+}: {
+  value: number | null;
+  min?: number;
+  max?: number;
+  title: string;
+  unit: string;
+  size?: number;
+  strokeWidth?: number;
+  redlineStart?: number | null;
+  highlightColor?: string;
+  subValue?: React.ReactNode;
+}) {
+  const clampedVal = Math.max(min, Math.min(max, value ?? 0));
+  const percent = (clampedVal - min) / (max - min);
+
+  // 240 degree gauge arc (from 150deg to 390deg)
+  const radius = (size - strokeWidth * 2) / 2;
+  const center = size / 2;
+  const totalAngle = 240;
+  const startAngle = 150;
+  const circumference = 2 * Math.PI * radius;
+  const arcLength = (totalAngle / 360) * circumference;
+  const strokeOffset = arcLength * (1 - percent);
+
+  const redlinePercent = redlineStart !== null ? (redlineStart - min) / (max - min) : null;
+  const redlineOffset = redlinePercent !== null ? arcLength * (1 - redlinePercent) : null;
+
+  return (
+    <div className="relative flex flex-col items-center justify-center" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="overflow-visible">
+        {/* Gauge Background Track */}
+        <circle
+          cx={center}
+          cy={center}
+          r={radius}
+          fill="none"
+          stroke="rgba(255, 255, 255, 0.08)"
+          strokeWidth={strokeWidth}
+          strokeDasharray={`${arcLength} ${circumference}`}
+          strokeLinecap="round"
+          transform={`rotate(${startAngle} ${center} ${center})`}
+        />
+
+        {/* Redline Background Zone */}
+        {redlineOffset !== null && redlinePercent !== null && (
+          <circle
+            cx={center}
+            cy={center}
+            r={radius}
+            fill="none"
+            stroke="rgba(239, 68, 68, 0.4)"
+            strokeWidth={strokeWidth}
+            strokeDasharray={`${arcLength * (1 - redlinePercent)} ${circumference}`}
+            strokeDashoffset={0}
+            strokeLinecap="round"
+            transform={`rotate(${startAngle + totalAngle * redlinePercent} ${center} ${center})`}
+          />
+        )}
+
+        {/* Active Filled Gauge Track */}
+        <motion.circle
+          cx={center}
+          cy={center}
+          r={radius}
+          fill="none"
+          stroke={clampedVal >= (redlineStart ?? Infinity) ? "var(--rpm-redline)" : highlightColor}
+          strokeWidth={strokeWidth + 2}
+          strokeDasharray={`${arcLength} ${circumference}`}
+          strokeDashoffset={strokeOffset}
+          strokeLinecap="round"
+          transform={`rotate(${startAngle} ${center} ${center})`}
+          transition={{ type: "spring", stiffness: 350, damping: 30 }}
+          style={{
+            filter: `drop-shadow(0 0 8px ${
+              clampedVal >= (redlineStart ?? Infinity) ? "rgba(239, 68, 68, 0.7)" : "var(--theme-glow)"
+            })`,
+          }}
+        />
+
+        {/* Scale Ticks */}
+        {[0, 0.25, 0.5, 0.75, 1].map((step) => {
+          const angle = (startAngle + totalAngle * step) * (Math.PI / 180);
+          const tickR1 = radius - strokeWidth / 2 - 4;
+          const tickR2 = radius - strokeWidth / 2 - 12;
+          const x1 = center + tickR1 * Math.cos(angle);
+          const y1 = center + tickR1 * Math.sin(angle);
+          const x2 = center + tickR2 * Math.cos(angle);
+          const y2 = center + tickR2 * Math.sin(angle);
+          const tickVal = Math.round(min + (max - min) * step);
+
+          return (
+            <g key={step}>
+              <line
+                x1={x1}
+                y1={y1}
+                x2={x2}
+                y2={y2}
+                stroke="rgba(255, 255, 255, 0.25)"
+                strokeWidth="1.5"
+              />
+            </g>
+          );
+        })}
+      </svg>
+
+      {/* Center Readout Content */}
+      <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+        <span className="text-[10px] font-medium uppercase tracking-[0.25em] text-muted">
+          {title}
+        </span>
+        <div className="my-0.5 text-4xl font-light tracking-tight text-main font-display cluster-glow sm:text-5xl">
+          <SmoothNumber value={value} digits={0} fast={true} />
+        </div>
+        <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-primary">
+          {unit}
+        </span>
+        {subValue && <div className="mt-1">{subValue}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------
+// F1 SEQUENTIAL SHIFT LIGHTS
+// ----------------------------------------------------
+function SequentialShiftLights({ rpm, activeAlert }: { rpm: number | null; activeAlert: boolean }) {
+  const currentRpm = rpm ?? 0;
+  // Toyota 1.4 D-4D diesel rev range: 1200 - 4500 RPM
+  const steps = [
+    { threshold: 1400, color: "bg-emerald-500", glow: "shadow-[0_0_10px_#10b981]" },
+    { threshold: 1800, color: "bg-emerald-400", glow: "shadow-[0_0_10px_#34d399]" },
+    { threshold: 2200, color: "bg-emerald-300", glow: "shadow-[0_0_12px_#6ee7b7]" },
+    { threshold: 2600, color: "bg-cyan-400", glow: "shadow-[0_0_12px_#22d3ee]" },
+    { threshold: 3000, color: "bg-amber-400", glow: "shadow-[0_0_12px_#fbbf24]" },
+    { threshold: 3400, color: "bg-amber-500", glow: "shadow-[0_0_14px_#f59e0b]" },
+    { threshold: 3800, color: "bg-orange-500", glow: "shadow-[0_0_14px_#f97316]" },
+    { threshold: 4100, color: "bg-red-500", glow: "shadow-[0_0_16px_#ef4444]" },
+    { threshold: 4300, color: "bg-red-600", glow: "shadow-[0_0_18px_#dc2626]" },
+    { threshold: 4500, color: "bg-red-600 animate-ping", glow: "shadow-[0_0_22px_#ef4444]" },
+  ];
+
+  const isFlashing = currentRpm >= 4200 || activeAlert;
+
+  return (
+    <div className="flex w-full items-center justify-between gap-1 rounded-xl border border-white/10 bg-black/60 px-2 py-1.5 backdrop-blur-md">
+      <div className="flex items-center gap-1">
+        <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+        <span className="text-[9px] font-bold tracking-widest text-muted">RPM</span>
+      </div>
+
+      <div className="flex flex-1 items-center justify-center gap-1 px-1 sm:gap-1.5">
+        {steps.map((step, idx) => {
+          const isActive = currentRpm >= step.threshold;
+          return (
+            <div
+              key={idx}
+              className={`h-2.5 flex-1 rounded-sm transition-all duration-75 sm:h-3 ${
+                isActive
+                  ? `${step.color} ${step.glow} opacity-100 scale-105`
+                  : "bg-white/10 opacity-30"
+              } ${isFlashing && isActive ? "animate-pulse" : ""}`}
+            />
+          );
+        })}
+      </div>
+
+      <div className="text-right">
+        <span className="text-[10px] font-semibold tabular-nums text-main">
+          {currentRpm > 0 ? `${currentRpm.toFixed(0)}` : "--"} <span className="text-[8px] text-muted">RPM</span>
+        </span>
+      </div>
+    </div>
+  );
 }
 
 export default function Home() {
@@ -215,16 +405,149 @@ export default function Home() {
     };
   }, [isNative]);
 
-  const data = isNative ? nativeData : apiData;
-  const error = isNative ? (nativeData?.last_error ? new Error(nativeData.last_error) : null) : apiError;
+  // Masaüstü Testi İçin Dinamik Sürüş Simülasyonu
+  const [demoMode, setDemoMode] = useState<boolean>(!isNative);
+  const [demoState, setDemoState] = useState<LiveData>({
+    connected: true,
+    rpm: 850,
+    speed_kmh: 0,
+    maf_gps: 5.2,
+    coolant_temp_c: 88,
+    load_percent: 18,
+    intake_temp_c: 24,
+    throttle_percent: 0,
+    map_kpa: 101,
+    distance_mil_on: 0,
+    turbo_boost_bar: 0.0,
+    fuel_display: 0.6,
+    fuel_unit: "L/h",
+    fuel_rate_lph: 0.6,
+    last_error: null,
+    updated_at: new Date().toISOString(),
+  });
+
+  useEffect(() => {
+    if (!demoMode) return;
+
+    let simTick = 0;
+    const interval = setInterval(() => {
+      simTick += 1;
+      const cycle = (simTick % 240) / 8; // 30 sn dongu
+
+      let speed = 0;
+      let rpm = 800;
+      let load = 15;
+      let boost = 0.0;
+      let throttle = 0;
+      let fuel = 0.6;
+      let unit = "L/h";
+
+      if (cycle < 3) {
+        // Duruyor / Rolanti
+        speed = 0;
+        rpm = 820 + Math.sin(simTick * 0.4) * 25;
+        load = 18;
+        boost = 0.0;
+        throttle = 0;
+        fuel = 0.6;
+        unit = "L/h";
+      } else if (cycle < 8) {
+        // 1. & 2. Vites Hizlanma
+        const p = (cycle - 3) / 5;
+        speed = p * 45;
+        rpm = 1200 + p * 2600;
+        load = 65 + p * 20;
+        boost = 0.4 + p * 0.7;
+        throttle = 40 + p * 30;
+        fuel = 7.2 - p * 1.5;
+        unit = "L/100km";
+      } else if (cycle < 16) {
+        // 3. & 4. Vites Yuksek Hizlanma & Turbo Boost
+        const p = (cycle - 8) / 8;
+        speed = 45 + p * 55;
+        rpm = 1800 + p * 1800;
+        load = 75 + p * 20;
+        boost = 0.8 + Math.sin(simTick * 0.5) * 0.4;
+        throttle = 60 + p * 25;
+        fuel = 5.8 + p * 1.2;
+        unit = "L/100km";
+      } else if (cycle < 24) {
+        // 5. Vites Otoban Seyir (Cruise)
+        speed = 100 + Math.sin(simTick * 0.2) * 8;
+        rpm = 2050 + Math.sin(simTick * 0.2) * 150;
+        load = 38;
+        boost = 0.35 + Math.sin(simTick * 0.3) * 0.15;
+        throttle = 25;
+        fuel = 4.2 + Math.sin(simTick * 0.4) * 0.4;
+        unit = "L/100km";
+      } else {
+        // Yavaslama & Fren
+        const p = (cycle - 24) / 6;
+        speed = Math.max(0, 100 * (1 - p));
+        rpm = Math.max(820, 2000 * (1 - p));
+        load = 10;
+        boost = 0.0;
+        throttle = 0;
+        fuel = speed > 15 ? 0.0 : 0.6;
+        unit = speed > 15 ? "L/100km" : "L/h";
+      }
+
+      setDemoState({
+        connected: true,
+        rpm: Math.round(rpm),
+        speed_kmh: Math.round(speed * 10) / 10,
+        maf_gps: Math.max(4, Math.round((rpm / 40) * 10) / 10),
+        coolant_temp_c: 88,
+        load_percent: Math.round(load),
+        intake_temp_c: 24,
+        throttle_percent: Math.round(throttle),
+        map_kpa: Math.round(101 + boost * 100),
+        distance_mil_on: 0,
+        turbo_boost_bar: Math.max(0, Math.round(boost * 100) / 100),
+        fuel_display: Math.max(0, Math.round(fuel * 100) / 100),
+        fuel_unit: unit,
+        fuel_rate_lph: unit === "L/h" ? fuel : (fuel * speed) / 100,
+        last_error: null,
+        updated_at: new Date().toISOString(),
+      });
+    }, 150);
+
+    return () => clearInterval(interval);
+  }, [demoMode]);
+
+  const rawData = isNative ? nativeData : apiData;
+  const data = demoMode ? demoState : rawData;
+  const error = isNative ? (nativeData?.last_error ? new Error(nativeData.last_error) : null) : (demoMode ? null : apiError);
 
   const [activeTab, setActiveTab] = useState<DashboardTab>("surus");
+  const [theme, setTheme] = useState<CockpitTheme>("cyber-cyan");
   const [wakeLockEnabled, setWakeLockEnabled] = useState(false);
   const [wakeLockSupported, setWakeLockSupported] = useState(false);
   const [wakeLockActive, setWakeLockActive] = useState(false);
   const wakeLockRef = useRef<ScreenWakeLock | null>(null);
   const isLandscape = useLandscape();
   const isPortrait = !isLandscape;
+
+  // Tema Yükleme & Kaydetme
+  useEffect(() => {
+    try {
+      const savedTheme = localStorage.getItem(STORAGE_KEY_THEME) as CockpitTheme | null;
+      if (savedTheme && ["cyber-cyan", "gr-red", "amber", "emerald"].includes(savedTheme)) {
+        setTheme(savedTheme);
+      }
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  const changeTheme = (newTheme: CockpitTheme) => {
+    setTheme(newTheme);
+    try {
+      localStorage.setItem(STORAGE_KEY_THEME, newTheme);
+    } catch {
+      // Ignore
+    }
+  };
 
   // ----------------------------------------------------
   // YAKIT FİYATI (TL / Litre)
@@ -382,6 +705,15 @@ export default function Home() {
 
   const speed = data?.speed_kmh ?? null;
   const turboBoost = data?.turbo_boost_bar ?? null;
+  const rpm = data?.rpm ?? null;
+  const maf = data?.maf_gps ?? null;
+  const coolant = data?.coolant_temp_c ?? null;
+  const load = data?.load_percent ?? null;
+  const intakeTemp = data?.intake_temp_c ?? null;
+  const throttle = data?.throttle_percent ?? null;
+  const map = data?.map_kpa ?? null;
+  const fuel = data?.fuel_display ?? null;
+  const fuelUnit = data?.fuel_unit ?? "--";
 
   // Peak Boost Takibi
   useEffect(() => {
@@ -471,19 +803,10 @@ export default function Home() {
   };
 
   // ----------------------------------------------------
-  // TÜRETİLMİŞ HESAPLAMALAR (Dizel Tork, Güç, Maliyet)
+  // TÜRETİLMİŞ HESAPLAMALAR (Dizel Tork, Güç, Vites, Maliyet)
   // ----------------------------------------------------
-  const rpm = data?.rpm ?? null;
-  const maf = data?.maf_gps ?? null;
-  const coolant = data?.coolant_temp_c ?? null;
-  const load = data?.load_percent ?? null;
-  const intakeTemp = data?.intake_temp_c ?? null;
-  const throttle = data?.throttle_percent ?? null;
-  const map = data?.map_kpa ?? null;
-  const fuel = data?.fuel_display ?? null;
-  const fuelUnit = data?.fuel_unit ?? "--";
+  const currentGear = useMemo(() => estimateGear(speed, rpm), [speed, rpm]);
 
-  // Ortalama Değerler
   const avgFuelL100km = useMemo(() => {
     if (trip.distanceKm >= 0.05 && trip.fuelLiters > 0) {
       return (trip.fuelLiters * 100) / trip.distanceKm;
@@ -499,7 +822,6 @@ export default function Home() {
     return null;
   }, [trip.distanceKm, trip.durationMs]);
 
-  // Maliyet Hesapları (TL)
   const tripTotalCostTL = useMemo(() => {
     return trip.fuelLiters * fuelPrice;
   }, [trip.fuelLiters, fuelPrice]);
@@ -511,24 +833,20 @@ export default function Home() {
     return null;
   }, [fuel, fuelUnit, fuelPrice]);
 
-  const instantCostTLPerHour = useMemo(() => {
-    if (fuelUnit === "L/h" && fuel !== null && fuel > 0) {
-      return fuel * fuelPrice;
-    }
-    return null;
-  }, [fuel, fuelUnit, fuelPrice]);
-
   // 2006 Toyota 1.4 D-4D (90 HP / 190 Nm) Tahmini Anlık Güç ve Tork
   const estimatedTorqueNm = useMemo(() => {
     if (load === null || rpm === null || rpm < 500) return 0;
-    // 1ND-TV motoru 1800-3000 RPM arası pik 190 Nm verir
-    const rpmFactor = rpm >= 1700 && rpm <= 3200 ? 1.0 : rpm < 1700 ? 0.75 + (0.25 * ((rpm - 750) / 950)) : Math.max(0.65, 1.0 - ((rpm - 3200) / 2000));
+    const rpmFactor =
+      rpm >= 1700 && rpm <= 3200
+        ? 1.0
+        : rpm < 1700
+          ? 0.75 + 0.25 * ((rpm - 750) / 950)
+          : Math.max(0.65, 1.0 - (rpm - 3200) / 2000);
     return Math.round((load / 100) * 190 * Math.max(0.1, rpmFactor));
   }, [load, rpm]);
 
   const estimatedHorsepower = useMemo(() => {
     if (estimatedTorqueNm === 0 || rpm === null) return 0;
-    // HP = (Torque(Nm) * RPM) / 7127
     const hp = (estimatedTorqueNm * rpm) / 7127;
     return Math.min(95, Math.round(hp));
   }, [estimatedTorqueNm, rpm]);
@@ -539,30 +857,27 @@ export default function Home() {
   const smartAlert = useMemo(() => {
     if (!data?.connected) return null;
 
-    // 1. Hararet Uyarısı
     if (coolant !== null && coolant >= 98) {
       return {
         type: "danger",
-        title: "YÜKSEK MOTOR SICAKLIĞI",
+        title: "YÜKSEK MOTOR HARARETİ",
         text: `Soğutma suyu ${coolant}°C! Yükü hafifletin ve rölantide soğumasını bekleyin.`,
       };
     }
 
-    // 2. Soğuk Motor & Turbo Koruma Uyarısı
     if (coolant !== null && coolant < 70) {
       return {
         type: "warning",
-        title: "MOTOR ISINIYOR (SOĞUK)",
-        text: `Su sıcaklığı ${coolant}°C. Yüksek devir ve sert boost yapmaktan kaçının.`,
+        title: "MOTOR SOĞUK • TURBO KORUMA",
+        text: `Su sıcaklığı ${coolant}°C. Sert gaz ve yüksek devirden kaçının.`,
       };
     }
 
-    // 3. Optimum Vites Yükseltme Tavsiyesi (Shift Light)
     if (rpm !== null && rpm >= 2200 && (load ?? 0) > 25 && (speed ?? 0) > 20) {
       return {
         type: "info",
         title: "VİTES YÜKSELT (SHIFT UP)",
-        text: "Optimum tork ve yakıt tasarrufu için bir üst vitese geçebilirsiniz.",
+        text: "Maksimum yakıt tasarrufu ve tork için bir üst vitese geçin.",
       };
     }
 
@@ -570,7 +885,7 @@ export default function Home() {
   }, [data?.connected, coolant, rpm, load, speed]);
 
   // ----------------------------------------------------
-  // WAKE LOCK (Ekranı Açık Tutma)
+  // WAKE LOCK
   // ----------------------------------------------------
   useEffect(() => {
     setWakeLockSupported(Boolean((navigator as NavigatorWithWakeLock).wakeLock));
@@ -646,509 +961,901 @@ export default function Home() {
     setWakeLockEnabled((prev) => !prev);
   };
 
-  const rpmPercent = Math.max(0, Math.min(100, ((rpm ?? 0) / 5000) * 100));
-  const boostPercent = Math.max(0, Math.min(100, ((turboBoost ?? 0) / 1.5) * 100));
-
-  const statusLabel = error
-    ? "Bağlantı Yok"
-    : data?.connected
-      ? "Canlı Telemetri"
-      : "Bağlanıyor...";
-
-  const activeMetrics = useMemo(() => {
-    switch (activeTab) {
-      case "surus":
-        return [
-          {
-            label: "Anlık Tüketim",
-            value: <SmoothNumber value={fuel} digits={2} />,
-            unit: fuelUnit,
-          },
-          {
-            label: "Anlık Maliyet",
-            value: (
-              <SmoothNumber
-                value={instantCostTLPerKm ?? instantCostTLPerHour}
-                digits={2}
-              />
-            ),
-            unit: instantCostTLPerKm ? "₺/km" : "₺/saat",
-          },
-          {
-            label: "Trip Mesafesi",
-            value: <SmoothNumber value={trip.distanceKm} digits={2} />,
-            unit: "km",
-          },
-          {
-            label: "Toplam Yakıt Tutarı",
-            value: <SmoothNumber value={tripTotalCostTL} digits={2} />,
-            unit: "₺",
-          },
-          {
-            label: "Ortalama Tüketim",
-            value: <SmoothNumber value={avgFuelL100km} digits={2} />,
-            unit: "L/100km",
-          },
-          {
-            label: "Ortalama Hız",
-            value: <SmoothNumber value={avgSpeedKmh} digits={0} />,
-            unit: "km/h",
-          },
-        ];
-
-      case "trip":
-        return [
-          {
-            label: "Kat Edilen Yol",
-            value: <SmoothNumber value={trip.distanceKm} digits={2} />,
-            unit: "km",
-          },
-          {
-            label: "Harcanan Yakıt",
-            value: <SmoothNumber value={trip.fuelLiters} digits={2} />,
-            unit: "Litre",
-          },
-          {
-            label: "Toplam Masraf",
-            value: <SmoothNumber value={tripTotalCostTL} digits={2} />,
-            unit: "₺",
-          },
-          {
-            label: "Ortalama Tüketim",
-            value: <SmoothNumber value={avgFuelL100km} digits={2} />,
-            unit: "L/100km",
-          },
-          {
-            label: "Ortalama Hız",
-            value: <SmoothNumber value={avgSpeedKmh} digits={0} />,
-            unit: "km/h",
-          },
-          {
-            label: "Maksimum Hız",
-            value: <SmoothNumber value={trip.maxSpeed} digits={0} />,
-            unit: "km/h",
-          },
-          {
-            label: "Sürüş Süresi",
-            value: formatTrip(trip.durationMs),
-            unit: "",
-          },
-          {
-            label: "Hareket Süresi",
-            value: formatTrip(trip.movingDurationMs),
-            unit: "",
-          },
-        ];
-
-      case "performans":
-        return [
-          {
-            label: "0-100 km/h Süresi",
-            value: perf.t100 ? `${perf.t100.toFixed(2)}s` : perf.status === "timing" ? "Ölçülüyor..." : perf.status === "ready" ? "Hazır" : "--",
-            unit: "",
-          },
-          {
-            label: "En İyi 0-100 (PB)",
-            value: perf.best0_100 ? `${perf.best0_100.toFixed(2)}s` : "--",
-            unit: "",
-          },
-          {
-            label: "0-50 km/h Süresi",
-            value: perf.t50 ? `${perf.t50.toFixed(2)}s` : "--",
-            unit: "",
-          },
-          {
-            label: "Peak Turbo Boost",
-            value: <SmoothNumber value={perf.peakBoost} digits={2} />,
-            unit: "Bar",
-          },
-          {
-            label: "Tahmini Tork",
-            value: <SmoothNumber value={estimatedTorqueNm} digits={0} />,
-            unit: "Nm",
-          },
-          {
-            label: "Tahmini Güç",
-            value: <SmoothNumber value={estimatedHorsepower} digits={0} />,
-            unit: "HP",
-          },
-        ];
-
-      case "motor":
-        return [
-          {
-            label: "Motor Devri (RPM)",
-            value: <SmoothNumber value={rpm} digits={0} />,
-            unit: "d/d",
-          },
-          {
-            label: "Soğutma Suyu",
-            value: <SmoothNumber value={coolant} digits={0} />,
-            unit: "°C",
-          },
-          {
-            label: "Hava Akışı (MAF)",
-            value: <SmoothNumber value={maf} digits={2} />,
-            unit: "g/s",
-          },
-          {
-            label: "Motor Yükü",
-            value: <SmoothNumber value={load} digits={1} />,
-            unit: "%",
-          },
-          {
-            label: "Emme Sıcaklığı (IAT)",
-            value: <SmoothNumber value={intakeTemp} digits={0} />,
-            unit: "°C",
-          },
-          {
-            label: "Gaz Pedalı Pozisyonu",
-            value: <SmoothNumber value={throttle} digits={1} />,
-            unit: "%",
-          },
-          {
-            label: "Manifold Basıncı (MAP)",
-            value: <SmoothNumber value={map} digits={0} />,
-            unit: "kPa",
-          },
-          {
-            label: "Turbo Boost",
-            value: <SmoothNumber value={turboBoost} digits={2} />,
-            unit: "Bar",
-          },
-        ];
-
-      case "saglik":
-        return [
-          {
-            label: "Bağlantı Protokolü",
-            value: "ISO 14230-4 KWP Fast (ATSP5)",
-            unit: "",
-          },
-          {
-            label: "Arıza Lambası Mesafesi",
-            value: <SmoothNumber value={data?.distance_mil_on ?? 0} digits={0} />,
-            unit: "km",
-          },
-          {
-            label: "Son Güncelleme",
-            value: formatTimestamp(data?.updated_at ?? null),
-            unit: "",
-          },
-          {
-            label: "Ekran Kilidi (WakeLock)",
-            value: wakeLockActive ? "Açık (Uyanık)" : "Kapalı",
-            unit: "",
-          },
-        ];
-    }
-  }, [
-    activeTab,
-    fuel,
-    fuelUnit,
-    trip.distanceKm,
-    trip.fuelLiters,
-    trip.maxSpeed,
-    trip.durationMs,
-    trip.movingDurationMs,
-    tripTotalCostTL,
-    instantCostTLPerKm,
-    instantCostTLPerHour,
-    avgFuelL100km,
-    avgSpeedKmh,
-    perf.t100,
-    perf.t50,
-    perf.status,
-    perf.best0_100,
-    perf.peakBoost,
-    estimatedTorqueNm,
-    estimatedHorsepower,
-    rpm,
-    coolant,
-    maf,
-    load,
-    intakeTemp,
-    throttle,
-    map,
-    turboBoost,
-    data?.distance_mil_on,
-    data?.updated_at,
-    wakeLockActive,
-  ]);
+  const boostPercent = Math.max(0, Math.min(100, (((turboBoost ?? 0) + 0.2) / 1.7) * 100));
+  const torquePercent = Math.max(0, Math.min(100, (estimatedTorqueNm / 190) * 100));
+  const hpPercent = Math.max(0, Math.min(100, (estimatedHorsepower / 90) * 100));
+  const loadPercent = Math.max(0, Math.min(100, load ?? 0));
+  const coolantPercent = Math.max(0, Math.min(100, (((coolant ?? 0) - 40) / 80) * 100));
 
   return (
-    <main className="relative min-h-[100svh] overflow-hidden bg-black px-3 pb-[max(5.5rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] text-[var(--ivory)] sm:px-6 sm:pb-6">
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(241,235,220,0.1),transparent_32%),radial-gradient(circle_at_70%_30%,rgba(255,255,255,0.04),transparent_28%),radial-gradient(circle_at_bottom,rgba(241,235,220,0.05),transparent_40%)]"
-      />
+    <main
+      data-theme={theme}
+      className="relative min-h-[100svh] overflow-x-hidden bg-cockpit-grid px-3 pb-[max(5rem,env(safe-area-inset-bottom))] pt-[max(0.6rem,env(safe-area-inset-top))] text-main transition-colors duration-300 sm:px-6 sm:pb-6 font-body"
+    >
+      <div className="relative mx-auto flex w-full max-w-7xl flex-col gap-3">
+        {/* ========================================================================= */}
+        {/* TOP CLUSTER HEADER (VEHICLE BADGE + TELL-TALE ICONS + SHIFT LIGHTS)     */}
+        {/* ========================================================================= */}
+        <header className="flex flex-col gap-2 rounded-2xl border border-card-border bg-card p-3 shadow-xl backdrop-blur-md">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            {/* Araç Modeli ve Durum Rozeti */}
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-8 items-center rounded-lg border border-primary/30 bg-primary/10 px-2.5 text-xs font-bold tracking-widest text-primary font-display">
+                TOYOTA
+              </div>
+              <div>
+                <div className="text-xs font-bold tracking-wider text-main font-display">
+                  COROLLA 1.4 D-4D
+                </div>
+                <div className="text-[9px] tracking-widest text-muted">
+                  1ND-TV • TURBO DIESEL
+                </div>
+              </div>
+            </div>
 
-      <div
-        className={`relative mx-auto grid w-full max-w-6xl gap-4 ${
-          isLandscape ? "lg:grid-cols-[1.08fr_0.92fr]" : "grid-cols-1"
-        }`}
-      >
-        {/* SOL KADRAN VE ANA TELEMETRİ KARTI */}
-        <section className="flex flex-col justify-between rounded-[2rem] border border-white/8 bg-white/[0.03] p-5 shadow-[0_0_50px_rgba(241,235,220,0.04)] backdrop-blur-[1px]">
-          <div>
-            <div className="mb-3 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.26em] text-[var(--ivory-muted)] sm:text-[11px]">
-              <span className="truncate">AuraDrive Pro • 1.4 D-4D</span>
-              <div className="flex items-center gap-2">
+            {/* Orta Tell-Tale Göstergeleri (Uyarı Lambaları) */}
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              {/* BLE Bağlantı Işığı */}
+              <div
+                className={`flex items-center gap-1 rounded-full border px-2 py-1 text-[9px] font-semibold tracking-wider ${
+                  data?.connected
+                    ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                    : error
+                      ? "border-red-500/40 bg-red-500/15 text-red-300"
+                      : "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                }`}
+                title={data?.connected ? "OBD-II Canlı Akış" : "Bağlantı Bekleniyor"}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    data?.connected
+                      ? "bg-emerald-400 animate-pulse"
+                      : error
+                        ? "bg-red-400"
+                        : "bg-amber-400 animate-ping"
+                  }`}
+                />
+                <span>{data?.connected ? "OBD-II CANLI" : error ? "KOPUK" : "BAĞLANIYOR"}</span>
+              </div>
+
+              {/* Hararet Uyarısı İkonu */}
+              <div
+                className={`flex h-7 w-7 items-center justify-center rounded-lg border text-xs ${
+                  coolant !== null && coolant >= 98
+                    ? "border-red-500 bg-red-500/20 text-red-400 animate-bounce"
+                    : coolant !== null && coolant < 70
+                      ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-300"
+                      : "border-white/10 bg-white/5 text-muted"
+                }`}
+                title={`Motor Sıcaklığı: ${coolant ?? "--"}°C`}
+              >
+                🌡️
+              </div>
+
+              {/* MIL / Arıza Lambası İkonu */}
+              <div
+                className={`flex h-7 w-7 items-center justify-center rounded-lg border text-xs ${
+                  (data?.distance_mil_on ?? 0) > 0
+                    ? "border-amber-500 bg-amber-500/20 text-amber-300 animate-pulse"
+                    : "border-white/10 bg-white/5 text-muted opacity-40"
+                }`}
+                title="Motor Arıza Lambası (MIL)"
+              >
+                ⚠️
+              </div>
+
+              {/* Ekran Kilidi (WakeLock) Butonu */}
+              <button
+                type="button"
+                onClick={() => void toggleWakeLock()}
+                className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider transition active:scale-95 ${
+                  wakeLockActive
+                    ? "border-primary bg-primary/20 text-primary shadow-[0_0_12px_var(--theme-glow)]"
+                    : "border-white/10 bg-white/5 text-muted"
+                }`}
+                title="Ekranı sürekli açık tutma kilidi"
+              >
+                <span>📱</span>
+                <span>{wakeLockActive ? "AÇIK" : "KİLİT"}</span>
+              </button>
+
+              {/* Mazot Fiyatı Düzenleme Rozeti */}
+              <button
+                type="button"
+                onClick={() => setIsFuelModalOpen(true)}
+                className="flex h-7 items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 text-[10px] font-bold text-amber-300 transition hover:bg-amber-500/20 active:scale-95"
+                title="Mazot litre fiyatı ayarla"
+              >
+                <span>⛽</span>
+                <span>{fuelPrice.toFixed(2)} ₺</span>
+              </button>
+
+              {/* Masaüstü Simülasyon Butonu */}
+              {!isNative && (
                 <button
                   type="button"
-                  onClick={() => setIsFuelModalOpen(true)}
-                  className="flex items-center gap-1.5 rounded-full border border-amber-400/25 bg-amber-400/10 px-2.5 py-1 text-[10px] tracking-wider text-amber-200 transition hover:bg-amber-400/20 active:scale-95 sm:px-3 sm:py-1.5"
-                  title="Mazot litre fiyatını değiştirmek için tıklayın"
+                  onClick={() => setDemoMode((prev) => !prev)}
+                  className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider transition active:scale-95 ${
+                    demoMode
+                      ? "border-emerald-400 bg-emerald-400/20 text-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.3)]"
+                      : "border-white/10 bg-white/5 text-muted"
+                  }`}
+                  title="Masaüstü test simülasyonunu aç/kapat"
                 >
-                  <span>⛽ {fuelPrice.toFixed(2)} ₺/L</span>
-                  <span className="text-[9px] opacity-70">✎</span>
+                  <span>🎮</span>
+                  <span>{demoMode ? "SİMÜLASYON" : "CANLI OBD"}</span>
                 </button>
-
-                <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] tracking-[0.2em] text-[var(--ivory)] sm:px-3 sm:py-1.5">
-                  {statusLabel}
-                </span>
-              </div>
+              )}
             </div>
 
-            {/* AKILLI MOTOR KORUMA & VİTES UYARI BİLDİRİMİ */}
-            {smartAlert ? (
-              <motion.div
-                initial={{ opacity: 0, y: -6 }}
-                animate={{ opacity: 1, y: 0 }}
-                className={`mb-3 rounded-2xl border px-3 py-2 text-xs backdrop-blur-md ${
-                  smartAlert.type === "danger"
-                    ? "border-red-500/30 bg-red-500/10 text-red-200"
-                    : smartAlert.type === "warning"
-                      ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
-                      : "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+            {/* Tema Değiştirici Butonları */}
+            <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-black/40 p-1">
+              <button
+                type="button"
+                onClick={() => changeTheme("cyber-cyan")}
+                className={`h-6 w-6 rounded-lg border transition ${
+                  theme === "cyber-cyan"
+                    ? "border-cyan-400 bg-cyan-400/30 shadow-[0_0_8px_#00f0ff]"
+                    : "border-transparent bg-cyan-950/40 opacity-50"
                 }`}
-              >
-                <div className="font-semibold uppercase tracking-wider text-[11px]">
-                  {smartAlert.title}
-                </div>
-                <div className="text-[10px] opacity-90">{smartAlert.text}</div>
-              </motion.div>
-            ) : null}
-
-            {/* RPM KADRAN ÇUBUĞU */}
-            <div className="h-[6px] w-full overflow-hidden rounded-full bg-white/10">
-              <motion.div
-                className="h-full rounded-full bg-[var(--ivory)]"
-                animate={{ width: `${rpmPercent}%` }}
-                transition={{ type: "spring", stiffness: 350, damping: 25 }}
+                title="Cyber Cyan Teması"
+              />
+              <button
+                type="button"
+                onClick={() => changeTheme("gr-red")}
+                className={`h-6 w-6 rounded-lg border transition ${
+                  theme === "gr-red"
+                    ? "border-red-500 bg-red-500/30 shadow-[0_0_8px_#ff2a3b]"
+                    : "border-transparent bg-red-950/40 opacity-50"
+                }`}
+                title="GR Sport Red Teması"
+              />
+              <button
+                type="button"
+                onClick={() => changeTheme("amber")}
+                className={`h-6 w-6 rounded-lg border transition ${
+                  theme === "amber"
+                    ? "border-amber-500 bg-amber-500/30 shadow-[0_0_8px_#ff9900]"
+                    : "border-transparent bg-amber-950/40 opacity-50"
+                }`}
+                title="Amber Gece Teması"
+              />
+              <button
+                type="button"
+                onClick={() => changeTheme("emerald")}
+                className={`h-6 w-6 rounded-lg border transition ${
+                  theme === "emerald"
+                    ? "border-emerald-400 bg-emerald-400/30 shadow-[0_0_8px_#00e676]"
+                    : "border-transparent bg-emerald-950/40 opacity-50"
+                }`}
+                title="Emerald Track Teması"
               />
             </div>
+          </div>
 
-            <div className="mt-2.5 flex items-center justify-between text-[10px] uppercase tracking-[0.22em] text-[var(--ivory-muted)] sm:text-[11px]">
-              <span>RPM</span>
-              <span>
-                <SmoothNumber value={rpm} digits={0} fast={true} /> / 5000 d/d
-              </span>
-            </div>
+          {/* F1 SEQUENTIAL SHIFT LIGHTS */}
+          <SequentialShiftLights rpm={rpm} activeAlert={smartAlert?.type === "info"} />
+        </header>
 
-            {/* TURBO BOOST ÇUBUĞU */}
-            <div className="mt-3">
-              <div className="h-[4px] w-full overflow-hidden rounded-full bg-white/5">
-                <motion.div
-                  className="h-full rounded-full bg-amber-200/80 shadow-[0_0_10px_rgba(251,191,36,0.5)]"
-                  animate={{ width: `${boostPercent}%` }}
-                  transition={{ type: "spring", stiffness: 300, damping: 22 }}
-                />
+        {/* AKILLI MOTOR KORUMA & VİTES UYARI BİLDİRİMİ */}
+        <AnimatePresence>
+          {smartAlert ? (
+            <motion.div
+              initial={{ opacity: 0, height: 0, y: -8 }}
+              animate={{ opacity: 1, height: "auto", y: 0 }}
+              exit={{ opacity: 0, height: 0, y: -8 }}
+              className={`rounded-2xl border px-4 py-2.5 backdrop-blur-md ${
+                smartAlert.type === "danger"
+                  ? "border-red-500/50 bg-red-500/15 text-red-200 shadow-[0_0_20px_rgba(239,68,68,0.25)]"
+                  : smartAlert.type === "warning"
+                    ? "border-amber-400/50 bg-amber-400/15 text-amber-200 shadow-[0_0_20px_rgba(251,191,36,0.2)]"
+                    : "border-emerald-400/50 bg-emerald-400/15 text-emerald-200 shadow-[0_0_20px_rgba(16,185,129,0.2)]"
+              }`}
+            >
+              <div className="flex items-center gap-2 font-display text-xs font-bold uppercase tracking-wider">
+                <span>{smartAlert.type === "danger" ? "🚨" : smartAlert.type === "warning" ? "⚠️" : "💡"}</span>
+                <span>{smartAlert.title}</span>
               </div>
-              <div className="mt-1.5 flex items-center justify-between text-[9px] uppercase tracking-[0.2em] text-[var(--ivory-muted)]">
-                <span>Turbo Boost</span>
-                <span>
-                  <SmoothNumber value={turboBoost} digits={2} fast={true} /> Bar
+              <div className="mt-0.5 text-xs opacity-90">{smartAlert.text}</div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+
+        {/* ========================================================================= */}
+        {/* MAIN COCKPIT SECTION: LANDSCAPE DUAL GAUGE OR PORTRAIT HUD               */}
+        {/* ========================================================================= */}
+        {isLandscape ? (
+          /* ---------------- LANDSCAPE MODE (DUAL GAUGE COCKPIT) ---------------- */
+          <div className="grid grid-cols-[1.1fr_1.3fr_1.1fr] gap-3">
+            {/* SOL KADRAN: HIZ VE VİTES */}
+            <div className="flex flex-col items-center justify-between rounded-3xl border border-card-border bg-card p-4 shadow-2xl backdrop-blur-md">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-muted">
+                HIZ GÖSTERGESİ
+              </div>
+              <RadialGauge
+                value={speed}
+                min={0}
+                max={220}
+                title="HIZ"
+                unit="KM/H"
+                size={230}
+                subValue={
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-md border border-primary/40 bg-primary/20 px-2 py-0.5 text-xs font-bold text-primary font-display">
+                      VİTES {currentGear}
+                    </span>
+                  </div>
+                }
+              />
+              <div className="flex w-full items-center justify-between border-t border-white/10 pt-2 text-xs">
+                <span className="text-muted">Anlık Tüketim:</span>
+                <span className="font-bold text-primary tabular-nums">
+                  <SmoothNumber value={fuel} digits={1} /> {fuelUnit}
                 </span>
               </div>
             </div>
-          </div>
 
-          {/* ANA HIZ GÖSTERGESİ */}
-          <div className="py-6 text-center leading-none sm:py-8">
-            <motion.div
-              initial={{ opacity: 0, y: 16 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.1, ease: "easeOut" }}
-              className="leading-none"
-            >
-              <div className="ivory-glow text-[clamp(5rem,18vw,11rem)] font-light tracking-[-0.06em] text-[var(--ivory)]">
-                <SmoothNumber value={speed} digits={0} fast={true} />
+            {/* ORTA PANEL: TURBO BOOST + DYNO + MFD TABLAR */}
+            <div className="flex flex-col justify-between gap-3 rounded-3xl border border-card-border bg-card p-4 shadow-2xl backdrop-blur-md">
+              {/* Turbo Basıncı Barı */}
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
+                <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted">
+                  <span className="flex items-center gap-1">
+                    <span>🌀</span> TURBO BASINCI
+                  </span>
+                  <span className="text-primary tabular-nums font-display text-sm">
+                    <SmoothNumber value={turboBoost} digits={2} fast={true} /> <span className="text-[10px] text-muted">BAR</span>
+                  </span>
+                </div>
+                <div className="relative mt-2 h-3 w-full overflow-hidden rounded-full bg-white/10">
+                  <motion.div
+                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-amber-400 to-red-500"
+                    animate={{ width: `${boostPercent}%` }}
+                    transition={{ type: "spring", stiffness: 350, damping: 25 }}
+                  />
+                </div>
+                <div className="mt-1 flex items-center justify-between text-[9px] text-muted">
+                  <span>-0.2 Bar</span>
+                  <span className="text-amber-300 font-bold">PEAK: {perf.peakBoost.toFixed(2)} Bar</span>
+                  <span>1.5 Bar</span>
+                </div>
               </div>
-              <div className="mt-1 text-[0.8rem] uppercase tracking-[0.35em] text-[var(--ivory-muted)]">
-                KM/H
+
+              {/* Canlı Dyno (Tork & Güç) */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-xl border border-white/10 bg-black/40 p-2.5">
+                  <div className="text-[9px] font-bold uppercase tracking-widest text-muted">
+                    TAHMİNİ TORK
+                  </div>
+                  <div className="my-0.5 text-xl font-bold text-main font-display tabular-nums">
+                    <SmoothNumber value={estimatedTorqueNm} digits={0} /> <span className="text-xs font-normal text-muted">Nm</span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                    <div className="h-full bg-primary" style={{ width: `${torquePercent}%` }} />
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/40 p-2.5">
+                  <div className="text-[9px] font-bold uppercase tracking-widest text-muted">
+                    TAHMİNİ GÜÇ
+                  </div>
+                  <div className="my-0.5 text-xl font-bold text-main font-display tabular-nums">
+                    <SmoothNumber value={estimatedHorsepower} digits={0} /> <span className="text-xs font-normal text-muted">HP</span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                    <div className="h-full bg-amber-400" style={{ width: `${hpPercent}%` }} />
+                  </div>
+                </div>
               </div>
-            </motion.div>
 
-            {/* ANLIK TÜKETİM VE MALİYET */}
-            <div className="mt-6 text-xs uppercase tracking-[0.24em] text-[var(--ivory-muted)]">
-              Anlık Yakıt Tüketimi
-            </div>
-            <div className="mt-1 flex items-end justify-center gap-2">
-              <div className="ivory-glow text-3xl font-light tracking-[-0.02em] text-[var(--ivory)]">
-                <SmoothNumber value={fuel} digits={2} />
-              </div>
-              <span className="pb-[0.3rem] text-sm uppercase tracking-[0.18em] text-[var(--ivory-muted)]">
-                {fuelUnit}
-              </span>
-            </div>
-
-            {instantCostTLPerKm || instantCostTLPerHour ? (
-              <div className="mt-1 text-[11px] uppercase tracking-[0.2em] text-[var(--ivory-muted)] opacity-80">
-                ≈{" "}
-                <SmoothNumber
-                  value={instantCostTLPerKm ?? instantCostTLPerHour}
-                  digits={2}
-                />{" "}
-                {instantCostTLPerKm ? "₺/km" : "₺/saat"}
-              </div>
-            ) : null}
-          </div>
-
-          {/* ALT BİLGİ KARTLARI */}
-          <div className="grid gap-3 text-center sm:grid-cols-2">
-            <div className="rounded-3xl border border-white/8 bg-white/[0.02] px-4 py-3.5 shadow-[0_0_24px_rgba(241,235,220,0.04)]">
-              <p className="text-[10px] uppercase tracking-[0.26em] text-[var(--ivory-muted)] sm:text-[11px]">
-                Motor Sıcaklığı
-              </p>
-              <p className="ivory-glow mt-1.5 text-2xl font-light text-[var(--ivory)]">
-                <SmoothNumber value={coolant} digits={0} />
-                <span className="ml-1 text-base">°C</span>
-              </p>
-            </div>
-
-            <div className="rounded-3xl border border-white/8 bg-white/[0.02] px-4 py-3.5 shadow-[0_0_24px_rgba(241,235,220,0.04)]">
-              <p className="text-[10px] uppercase tracking-[0.26em] text-[var(--ivory-muted)] sm:text-[11px]">
-                Trip Mesafesi
-              </p>
-              <p className="ivory-glow mt-1.5 text-2xl font-light text-[var(--ivory)]">
-                <SmoothNumber value={trip.distanceKm} digits={2} />
-                <span className="ml-1 text-base">km</span>
-              </p>
-            </div>
-          </div>
-        </section>
-
-        {/* SAĞ PANEL / DETAYLI SEKMELER */}
-        <section className="flex flex-col justify-between gap-4 rounded-[2rem] border border-white/8 bg-white/[0.03] p-4 shadow-[0_0_50px_rgba(241,235,220,0.03)] backdrop-blur-[1px]">
-          {!isPortrait ? (
-            <div className="grid grid-cols-5 gap-1.5">
-              {dashboardTabs.map((tab) => {
-                const isActive = activeTab === tab.id;
-
-                return (
+              {/* Sekme Seçici */}
+              <div className="grid grid-cols-5 gap-1 border-t border-white/10 pt-2">
+                {dashboardTabs.map((tab) => (
                   <button
                     key={tab.id}
                     type="button"
                     onClick={() => setActiveTab(tab.id)}
-                    className={`min-h-[50px] rounded-2xl border px-1 text-[9px] uppercase tracking-[0.18em] transition active:scale-[0.98] sm:text-[10px] ${
-                      isActive
-                        ? "border-[rgba(241,235,220,0.32)] bg-[rgba(241,235,220,0.12)] text-[var(--ivory)] shadow-[0_0_28px_rgba(241,235,220,0.08)]"
-                        : "border-white/10 bg-white/[0.03] text-[var(--ivory-muted)]"
+                    className={`rounded-xl border py-1.5 text-center text-[10px] font-bold uppercase tracking-wider transition ${
+                      activeTab === tab.id
+                        ? "border-primary bg-primary/20 text-primary shadow-[0_0_12px_var(--theme-glow)]"
+                        : "border-white/10 bg-white/5 text-muted hover:bg-white/10"
                     }`}
-                    aria-pressed={isActive}
                   >
                     {tab.label}
                   </button>
-                );
-              })}
-            </div>
-          ) : null}
-
-          {/* METRİK KARTLARI */}
-          <div
-            className={`grid gap-2.5 ${
-              isLandscape ? "lg:grid-cols-2" : "grid-cols-1 sm:grid-cols-2"
-            }`}
-          >
-            {activeMetrics.map((metric) => (
-              <div
-                key={metric.label}
-                className="rounded-[1.4rem] border border-white/8 bg-white/[0.02] px-4 py-3.5 shadow-[0_0_26px_rgba(241,235,220,0.04)]"
-              >
-                <p className="text-[9px] uppercase tracking-[0.24em] text-[var(--ivory-muted)] sm:text-[10px]">
-                  {metric.label}
-                </p>
-                <p className="ivory-glow mt-1.5 flex flex-wrap items-end gap-x-2 gap-y-1 text-2xl font-light text-[var(--ivory)]">
-                  <span>{metric.value}</span>
-                  {metric.unit ? (
-                    <span className="pb-[0.15rem] text-xs uppercase tracking-[0.16em] text-[var(--ivory-muted)]">
-                      {metric.unit}
-                    </span>
-                  ) : null}
-                </p>
+                ))}
               </div>
-            ))}
+            </div>
+
+            {/* SAĞ KADRAN: DEVİR (RPM) VE SICAKLIK */}
+            <div className="flex flex-col items-center justify-between rounded-3xl border border-card-border bg-card p-4 shadow-2xl backdrop-blur-md">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-muted">
+                MOTOR DEVRİ
+              </div>
+              <RadialGauge
+                value={rpm}
+                min={0}
+                max={5000}
+                title="RPM"
+                unit="D/D"
+                size={230}
+                redlineStart={4200}
+                highlightColor="var(--theme-secondary)"
+                subValue={
+                  <span className="text-xs font-semibold text-muted tabular-nums">
+                    Yük: {load !== null ? `${load.toFixed(0)}%` : "--"}
+                  </span>
+                }
+              />
+              <div className="flex w-full items-center justify-between border-t border-white/10 pt-2 text-xs">
+                <span className="text-muted">Motor Sıcaklığı:</span>
+                <span className={`font-bold tabular-nums ${coolant && coolant >= 98 ? "text-red-400" : "text-emerald-400"}`}>
+                  <SmoothNumber value={coolant} digits={0} /> °C
+                </span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* ---------------- PORTRAIT MODE (VERTICAL VEHICLE CLUSTER) ---------------- */
+          <div className="flex flex-col gap-3">
+            {/* ANA HIZ VE KOKPİT TELEMETRİ KARTI */}
+            <section className="relative overflow-hidden rounded-[2.5rem] border border-card-border bg-card p-5 shadow-2xl backdrop-blur-md">
+              {/* Arka Plan Hız İvme Efekti */}
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,var(--theme-glow),transparent_70%)] opacity-30"
+              />
+
+              {/* Üst Bilgi Satırı */}
+              <div className="flex items-center justify-between text-xs text-muted">
+                <span className="flex items-center gap-1 font-semibold uppercase tracking-wider">
+                  <span className="h-2 w-2 rounded-full bg-primary" /> ANLIK TELEMETRİ
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="rounded-lg border border-primary/40 bg-primary/15 px-2.5 py-0.5 text-xs font-bold text-primary font-display">
+                    VİTES: {currentGear}
+                  </span>
+                </div>
+              </div>
+
+              {/* ANA HIZ SAYACI */}
+              <div className="py-4 text-center">
+                <motion.div
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  className="inline-block"
+                >
+                  <div className="cluster-glow text-[clamp(5.5rem,24vw,9rem)] font-light leading-none tracking-tight text-main font-display tabular-nums">
+                    <SmoothNumber value={speed} digits={0} fast={true} />
+                  </div>
+                  <div className="mt-1 text-sm font-bold uppercase tracking-[0.4em] text-primary font-display">
+                    KM / SAAT
+                  </div>
+                </motion.div>
+              </div>
+
+              {/* GAUGE BARS: TURBO BOOST & DYNO GÜÇ */}
+              <div className="space-y-3 pt-2">
+                {/* Turbo Boost Barı */}
+                <div>
+                  <div className="mb-1 flex items-center justify-between text-[11px] font-bold uppercase tracking-wider">
+                    <span className="flex items-center gap-1 text-muted">
+                      <span>🌀</span> TURBO BASINCI
+                    </span>
+                    <span className="text-primary font-display tabular-nums">
+                      <SmoothNumber value={turboBoost} digits={2} fast={true} /> <span className="text-[9px] text-muted">BAR</span>
+                    </span>
+                  </div>
+                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-white/10">
+                    <motion.div
+                      className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-amber-400 to-red-500"
+                      animate={{ width: `${boostPercent}%` }}
+                      transition={{ type: "spring", stiffness: 350, damping: 25 }}
+                    />
+                  </div>
+                  <div className="mt-1 flex justify-between text-[9px] text-muted">
+                    <span>0.0 Bar</span>
+                    <span className="text-amber-300 font-semibold">PEAK: {perf.peakBoost.toFixed(2)} Bar</span>
+                    <span>1.5 Bar</span>
+                  </div>
+                </div>
+
+                {/* Dyno Tork & Beygir Barı */}
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <div className="rounded-xl border border-white/10 bg-black/40 p-2.5">
+                    <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-muted">
+                      <span>TORK</span>
+                      <span className="text-primary font-display tabular-nums">
+                        <SmoothNumber value={estimatedTorqueNm} digits={0} /> <span className="text-[8px] text-muted">Nm</span>
+                      </span>
+                    </div>
+                    <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                      <div className="h-full bg-primary" style={{ width: `${torquePercent}%` }} />
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-white/10 bg-black/40 p-2.5">
+                    <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-muted">
+                      <span>GÜÇ</span>
+                      <span className="text-amber-300 font-display tabular-nums">
+                        <SmoothNumber value={estimatedHorsepower} digits={0} /> <span className="text-[8px] text-muted">HP</span>
+                      </span>
+                    </div>
+                    <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                      <div className="h-full bg-amber-400" style={{ width: `${hpPercent}%` }} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* HIZLI KONTROL KARTLARI */}
+              <div className="mt-4 grid grid-cols-2 gap-2 border-t border-white/10 pt-3">
+                <div className="rounded-2xl border border-white/8 bg-black/30 p-3 text-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Anlık Tüketim
+                  </div>
+                  <div className="mt-1 text-2xl font-light text-main font-display tabular-nums">
+                    <SmoothNumber value={fuel} digits={2} />
+                    <span className="ml-1 text-xs text-primary">{fuelUnit}</span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/8 bg-black/30 p-3 text-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Motor Sıcaklığı
+                  </div>
+                  <div className="mt-1 text-2xl font-light text-main font-display tabular-nums">
+                    <SmoothNumber value={coolant} digits={0} />
+                    <span className="ml-1 text-xs text-primary">°C</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* MULTI-FUNCTION DISPLAY (MFD) TABS & CONTENT                              */}
+        {/* ========================================================================= */}
+        <section className="flex flex-col gap-3 rounded-[2.5rem] border border-card-border bg-card p-4 shadow-2xl backdrop-blur-md">
+          {/* MFD Sekme Başlıkları */}
+          <div className="grid grid-cols-5 gap-1.5">
+            {dashboardTabs.map((tab) => {
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`min-h-[46px] rounded-2xl border px-1 py-1.5 text-center transition active:scale-95 ${
+                    isActive
+                      ? "border-primary bg-primary/20 text-primary shadow-[0_0_16px_var(--theme-glow)] font-bold"
+                      : "border-white/10 bg-black/30 text-muted hover:bg-white/5"
+                  }`}
+                >
+                  <div className="text-xs">{tab.icon}</div>
+                  <div className="mt-0.5 text-[9px] uppercase tracking-wider font-display sm:text-[10px]">
+                    {tab.label}
+                  </div>
+                </button>
+              );
+            })}
           </div>
 
-          {/* SEKME ÖZEL BUTONLARI & AYARLARI */}
-          {activeTab === "trip" ? (
-            <div className="mt-2 flex flex-col gap-2">
-              <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.02] px-3.5 py-2.5 text-xs">
-                <span className="text-[10px] uppercase tracking-[0.2em] text-[var(--ivory-muted)]">
-                  Mazot Litre Fiyatı:
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setIsFuelModalOpen(true)}
-                  className="flex items-center gap-1.5 rounded-full border border-amber-400/25 bg-amber-400/10 px-3 py-1 text-xs text-amber-200 transition hover:bg-amber-400/20 active:scale-95"
-                >
-                  <span>{fuelPrice.toFixed(2)} ₺ / Litre</span>
-                  <span className="text-[10px] opacity-70">✎ Değiştir</span>
-                </button>
+          {/* SEKME 1: SÜRÜŞ (DRIVE HUD) */}
+          {activeTab === "surus" && (
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Trip Mesafesi
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={trip.distanceKm} digits={2} /> <span className="text-xs text-primary">KM</span>
+                </div>
               </div>
 
-              <button
-                type="button"
-                onClick={resetTrip}
-                className="w-full rounded-2xl border border-[rgba(241,235,220,0.25)] bg-[rgba(241,235,220,0.08)] py-3 text-xs uppercase tracking-[0.24em] text-[var(--ivory)] transition hover:bg-[rgba(241,235,220,0.15)] active:scale-[0.98]"
-              >
-                Yeni Sürüş Başlat / Trip Sıfırla
-              </button>
-            </div>
-          ) : null}
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Trip Yakıt Tutarı
+                </div>
+                <div className="mt-1 text-2xl font-bold text-emerald-400 font-display tabular-nums">
+                  <SmoothNumber value={tripTotalCostTL} digits={2} /> <span className="text-xs text-emerald-500">₺</span>
+                </div>
+              </div>
 
-          {activeTab === "performans" ? (
-            <div className="mt-2 flex justify-center">
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Ortalama Tüketim
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={avgFuelL100km} digits={2} /> <span className="text-xs text-primary">L/100km</span>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Ortalama Hız
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={avgSpeedKmh} digits={0} /> <span className="text-xs text-primary">KM/H</span>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Anlık Maliyet
+                </div>
+                <div className="mt-1 text-2xl font-bold text-amber-300 font-display tabular-nums">
+                  <SmoothNumber value={instantCostTLPerKm} digits={2} /> <span className="text-xs text-amber-400">₺/km</span>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Motor Yükü
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={load} digits={0} /> <span className="text-xs text-primary">%</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SEKME 2: TRİP (YOL BİLGİSAYARI) */}
+          {activeTab === "trip" && (
+            <div className="flex flex-col gap-3">
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Kat Edilen Yol
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                    <SmoothNumber value={trip.distanceKm} digits={2} /> <span className="text-xs text-primary">KM</span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Harcanan Mazot
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-amber-300 font-display tabular-nums">
+                    <SmoothNumber value={trip.fuelLiters} digits={2} /> <span className="text-xs text-amber-400">L</span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Toplam Yakıt Masrafı
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-emerald-400 font-display tabular-nums">
+                    <SmoothNumber value={tripTotalCostTL} digits={2} /> <span className="text-xs text-emerald-500">₺</span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Ortalama Tüketim
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                    <SmoothNumber value={avgFuelL100km} digits={2} /> <span className="text-xs text-primary">L/100km</span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Ortalama Hız
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                    <SmoothNumber value={avgSpeedKmh} digits={0} /> <span className="text-xs text-primary">KM/H</span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Maksimum Hız
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                    <SmoothNumber value={trip.maxSpeed} digits={0} /> <span className="text-xs text-primary">KM/H</span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Sürüş Süresi
+                  </div>
+                  <div className="mt-1 text-xl font-bold text-main font-display tabular-nums">
+                    {formatTrip(trip.durationMs)}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Hareket Süresi
+                  </div>
+                  <div className="mt-1 text-xl font-bold text-main font-display tabular-nums">
+                    {formatTrip(trip.movingDurationMs)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Trip Butonları */}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={resetTrip}
+                  className="flex-1 rounded-2xl border border-red-500/40 bg-red-500/15 py-3 text-xs font-bold uppercase tracking-widest text-red-200 transition hover:bg-red-500/25 active:scale-98"
+                >
+                  🔄 Yeni Sürüş Başlat / Trip Sıfırla
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* SEKME 3: PERFORMANS (0-100 DRAG & DYNO) */}
+          {activeTab === "performans" && (
+            <div className="flex flex-col gap-3">
+              {/* Dragy / RaceChrono Tarzı Başlatma Kutusu */}
+              <div className="rounded-2xl border border-white/10 bg-black/50 p-4 text-center">
+                <div className="flex items-center justify-center gap-2">
+                  <span className="text-xl">⏱️</span>
+                  <span className="text-xs font-bold uppercase tracking-widest text-muted">
+                    0-100 KM/H HIZLANMA TESTİ
+                  </span>
+                </div>
+
+                <div className="my-4 flex items-center justify-center gap-4">
+                  <div className="text-center">
+                    <div className="text-4xl font-extrabold text-main font-display tabular-nums">
+                      {perf.t100 ? `${perf.t100.toFixed(2)}s` : perf.status === "timing" ? "Ölçülüyor..." : "--"}
+                    </div>
+                    <div className="mt-1 text-[10px] uppercase tracking-wider text-muted">
+                      Son Ölçüm
+                    </div>
+                  </div>
+
+                  <div className="h-10 w-[1px] bg-white/10" />
+
+                  <div className="text-center">
+                    <div className="text-4xl font-extrabold text-amber-300 font-display tabular-nums">
+                      {perf.best0_100 ? `${perf.best0_100.toFixed(2)}s` : "--"}
+                    </div>
+                    <div className="mt-1 text-[10px] uppercase tracking-wider text-amber-400">
+                      En İyi Süre (PB)
+                    </div>
+                  </div>
+                </div>
+
+                {/* Drag Durum Rozeti */}
+                <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-4 py-1.5 text-xs font-bold text-primary font-display">
+                  <span className="h-2 w-2 rounded-full bg-primary animate-ping" />
+                  <span>
+                    {perf.status === "ready"
+                      ? "HAZIR • GAZA BASIN"
+                      : perf.status === "timing"
+                        ? "HIZLANMA ÖLÇÜLÜYOR..."
+                        : perf.status === "finished"
+                          ? "TEST TAMAMLANDI"
+                          : "DURUN (0 KM/H)"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Detaylı Performans Metrikleri */}
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3 text-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    0-50 km/h
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                    {perf.t50 ? `${perf.t50.toFixed(2)}s` : "--"}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3 text-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Peak Turbo Boost
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-cyan-300 font-display tabular-nums">
+                    {perf.peakBoost.toFixed(2)} <span className="text-xs text-muted">Bar</span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3 text-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Anlık Tork
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-primary font-display tabular-nums">
+                    <SmoothNumber value={estimatedTorqueNm} digits={0} /> <span className="text-xs text-muted">Nm</span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/40 p-3 text-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Anlık Güç
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-amber-300 font-display tabular-nums">
+                    <SmoothNumber value={estimatedHorsepower} digits={0} /> <span className="text-xs text-muted">HP</span>
+                  </div>
+                </div>
+              </div>
+
               <button
                 type="button"
                 onClick={resetPerformance}
-                className="w-full rounded-2xl border border-[rgba(241,235,220,0.25)] bg-[rgba(241,235,220,0.08)] py-3 text-xs uppercase tracking-[0.24em] text-[var(--ivory)] transition hover:bg-[rgba(241,235,220,0.15)] active:scale-[0.98]"
+                className="w-full rounded-2xl border border-white/10 bg-white/5 py-3 text-xs font-bold uppercase tracking-widest text-muted transition hover:bg-white/10 active:scale-98"
               >
-                0-100 & Peak Basıncı Sıfırla
+                0-100 ve Peak Basıncı Sıfırla
               </button>
             </div>
-          ) : null}
+          )}
+
+          {/* SEKME 4: MOTOR (SENSÖR MATRİSİ) */}
+          {activeTab === "motor" && (
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Motor Devri (RPM)
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={rpm} digits={0} /> <span className="text-xs text-primary">D/D</span>
+                </div>
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full bg-primary" style={{ width: `${Math.min(100, ((rpm ?? 0) / 5000) * 100)}%` }} />
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Soğutma Suyu Sıcaklığı
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={coolant} digits={0} /> <span className="text-xs text-primary">°C</span>
+                </div>
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                  <div className={`h-full ${coolant && coolant >= 98 ? "bg-red-500" : "bg-emerald-400"}`} style={{ width: `${coolantPercent}%` }} />
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Hava Akışı (MAF)
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={maf} digits={2} /> <span className="text-xs text-primary">G/S</span>
+                </div>
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full bg-cyan-400" style={{ width: `${Math.min(100, ((maf ?? 0) / 120) * 100)}%` }} />
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Motor Yükü
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={load} digits={1} /> <span className="text-xs text-primary">%</span>
+                </div>
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full bg-amber-400" style={{ width: `${loadPercent}%` }} />
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Manifold Basıncı (MAP)
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={map} digits={0} /> <span className="text-xs text-primary">KPA</span>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Turbo Boost Basıncı
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={turboBoost} digits={2} /> <span className="text-xs text-primary">BAR</span>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Emme Sıcaklığı (IAT)
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={intakeTemp} digits={0} /> <span className="text-xs text-primary">°C</span>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Gaz Pedalı Açısı
+                </div>
+                <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={throttle} digits={1} /> <span className="text-xs text-primary">%</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SEKME 5: SAĞLIK (SİSTEM & TEŞHİS) */}
+          {activeTab === "saglik" && (
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  OBD-II Bağlantı Protokolü
+                </div>
+                <div className="mt-1 text-lg font-bold text-primary font-display">
+                  ISO 14230-4 KWP Fast (ATSP5)
+                </div>
+                <div className="mt-1 text-xs text-muted">
+                  Toyota 2006 K-Line hızlı protokol başlatma
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Arıza Lambası (MIL) Mesafesi
+                </div>
+                <div className="mt-1 text-lg font-bold text-main font-display tabular-nums">
+                  <SmoothNumber value={data?.distance_mil_on ?? 0} digits={0} /> <span className="text-xs text-muted">KM</span>
+                </div>
+                <div className="mt-1 text-xs text-emerald-400">
+                  {(data?.distance_mil_on ?? 0) === 0 ? "✓ Aktif arıza kodu yok" : "⚠️ Arıza kodu mevcut"}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Son Telemetri Paketi
+                </div>
+                <div className="mt-1 text-lg font-bold text-main font-display tabular-nums">
+                  {formatTimestamp(data?.updated_at ?? null)}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Ekran Kilidi (WakeLock)
+                </div>
+                <div className="mt-1 text-lg font-bold text-main font-display">
+                  {wakeLockActive ? "🟢 Aktif (Ekran Kapanmaz)" : "⚪ Pasif"}
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       </div>
 
-      {/* YAKIT FİYATI GÜNCELLEME MODALI */}
+      {/* ========================================================================= */}
+      {/* YAKIT FİYATI DÜZENLEME MODALI                                            */}
+      {/* ========================================================================= */}
       {isFuelModalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4 backdrop-blur-md">
           <motion.div
             initial={{ opacity: 0, scale: 0.95, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            className="w-full max-w-sm rounded-[2rem] border border-amber-400/30 bg-[#0c0c0c] p-6 shadow-[0_0_60px_rgba(251,191,36,0.12)] text-[var(--ivory)]"
+            className="w-full max-w-sm rounded-[2rem] border border-amber-500/40 bg-[#0c0e14] p-6 shadow-2xl text-main"
           >
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <div className="flex items-center gap-2">
                 <span className="text-xl">⛽</span>
-                <h3 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--ivory)]">
+                <h3 className="text-sm font-bold uppercase tracking-widest text-amber-300 font-display">
                   Mazot Litre Fiyatı
                 </h3>
               </div>
               <button
                 type="button"
                 onClick={() => setIsFuelModalOpen(false)}
-                className="flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-white/5 text-xs text-[var(--ivory-muted)] hover:bg-white/10"
+                className="flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-white/5 text-xs text-muted hover:bg-white/10"
               >
                 ✕
               </button>
             </div>
 
             <div className="py-5 text-center">
-              <div className="text-[11px] uppercase tracking-wider text-[var(--ivory-muted)]">
-                Güncel Akaryakıt Pompa Fiyatı
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                Pompa Litre Fiyatı (TL)
               </div>
 
               <div className="mt-3 flex items-center justify-center gap-2">
@@ -1158,54 +1865,54 @@ export default function Home() {
                   autoFocus
                   value={fuelPriceInput}
                   onChange={(e) => setFuelPriceInput(e.target.value)}
-                  className="w-36 rounded-2xl border border-amber-400/40 bg-black/70 px-3 py-2 text-center text-3xl font-light text-amber-200 shadow-inner outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400"
+                  className="w-36 rounded-2xl border border-amber-500/50 bg-black/80 px-3 py-2 text-center text-3xl font-bold text-amber-300 shadow-inner outline-none focus:border-amber-400 font-display tabular-nums"
                 />
-                <span className="text-xl font-light text-[var(--ivory-muted)]">₺ / L</span>
+                <span className="text-xl font-bold text-muted">₺ / L</span>
               </div>
 
-              {/* HIZLI AYAR BUTONLARI (+/-) */}
+              {/* Hızlı Ayar Butonları */}
               <div className="mt-4 flex items-center justify-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => adjustFuelPrice(-1.0)}
-                  className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] tracking-wider text-[var(--ivory-muted)] hover:bg-white/10 active:scale-95"
+                  className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-bold text-muted hover:bg-white/10 active:scale-95"
                 >
                   -1.00 ₺
                 </button>
                 <button
                   type="button"
                   onClick={() => adjustFuelPrice(-0.1)}
-                  className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] tracking-wider text-[var(--ivory-muted)] hover:bg-white/10 active:scale-95"
+                  className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-bold text-muted hover:bg-white/10 active:scale-95"
                 >
                   -0.10 ₺
                 </button>
                 <button
                   type="button"
                   onClick={() => adjustFuelPrice(0.1)}
-                  className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] tracking-wider text-[var(--ivory-muted)] hover:bg-white/10 active:scale-95"
+                  className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-bold text-muted hover:bg-white/10 active:scale-95"
                 >
                   +0.10 ₺
                 </button>
                 <button
                   type="button"
                   onClick={() => adjustFuelPrice(1.0)}
-                  className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] tracking-wider text-[var(--ivory-muted)] hover:bg-white/10 active:scale-95"
+                  className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-bold text-muted hover:bg-white/10 active:scale-95"
                 >
                   +1.00 ₺
                 </button>
               </div>
 
-              {/* TAHMİNİ ÖRNEK MALİYET BİLGİSİ */}
-              <div className="mt-5 rounded-2xl border border-white/8 bg-white/[0.02] p-3 text-left text-[11px] text-[var(--ivory-muted)]">
+              {/* Örnek Hesap Tablosu */}
+              <div className="mt-5 rounded-2xl border border-white/8 bg-black/40 p-3 text-left text-xs text-muted">
                 <div className="flex justify-between py-0.5">
-                  <span>100 km Tüketim (Ort. 5.0 L):</span>
-                  <span className="font-medium text-[var(--ivory)]">
+                  <span>100 km (Ort. 5.0 L):</span>
+                  <span className="font-bold text-main tabular-nums">
                     {((parseFloat(fuelPriceInput) || fuelPrice) * 5).toFixed(2)} ₺
                   </span>
                 </div>
                 <div className="flex justify-between py-0.5">
-                  <span>Tam Depo Dolumu (45 L):</span>
-                  <span className="font-medium text-[var(--ivory)]">
+                  <span>Tam Depo (45 L):</span>
+                  <span className="font-bold text-main tabular-nums">
                     {((parseFloat(fuelPriceInput) || fuelPrice) * 45).toFixed(2)} ₺
                   </span>
                 </div>
@@ -1216,7 +1923,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setIsFuelModalOpen(false)}
-                className="w-1/3 rounded-2xl border border-white/10 bg-white/5 py-3 text-xs uppercase tracking-wider text-[var(--ivory-muted)] hover:bg-white/10 active:scale-98"
+                className="w-1/3 rounded-2xl border border-white/10 bg-white/5 py-3 text-xs font-bold uppercase tracking-wider text-muted hover:bg-white/10 active:scale-98"
               >
                 Vazgeç
               </button>
@@ -1228,7 +1935,7 @@ export default function Home() {
                     saveFuelPrice(val);
                   }
                 }}
-                className="w-2/3 rounded-2xl border border-amber-400/40 bg-amber-400/20 py-3 text-xs uppercase tracking-[0.2em] text-amber-100 shadow-[0_0_20px_rgba(251,191,36,0.15)] transition hover:bg-amber-400/30 active:scale-98"
+                className="w-2/3 rounded-2xl border border-amber-500/50 bg-amber-500/25 py-3 text-xs font-bold uppercase tracking-widest text-amber-100 shadow-[0_0_20px_rgba(251,191,36,0.2)] transition hover:bg-amber-500/35 active:scale-98"
               >
                 Fiyatı Kaydet
               </button>
@@ -1237,38 +1944,29 @@ export default function Home() {
         </div>
       ) : null}
 
-      {/* MOBİL ALT MENÜ BAR (PORTRAIT) */}
-      <div className="fixed inset-x-0 bottom-0 z-20 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:hidden">
-        <div className="mx-auto grid max-w-md grid-cols-6 gap-1 rounded-[1.75rem] border border-white/10 bg-black/85 p-1.5 shadow-[0_0_40px_rgba(0,0,0,0.5)] backdrop-blur-xl">
+      {/* ========================================================================= */}
+      {/* MOBİL ALT SABİT NAVİGASYON (PORTRAIT)                                     */}
+      {/* ========================================================================= */}
+      <div className="fixed inset-x-0 bottom-0 z-20 px-3 pb-[max(0.6rem,env(safe-area-inset-bottom))] sm:hidden">
+        <div className="mx-auto grid max-w-md grid-cols-5 gap-1 rounded-2xl border border-card-border bg-black/90 p-1.5 shadow-2xl backdrop-blur-xl">
           {dashboardTabs.map((tab) => {
             const isActive = activeTab === tab.id;
-
             return (
               <button
                 key={tab.id}
                 type="button"
                 onClick={() => setActiveTab(tab.id)}
-                className={`min-h-[48px] rounded-[1.2rem] border px-0.5 text-[8px] uppercase tracking-[0.12em] transition active:scale-[0.98] ${
+                className={`flex flex-col items-center justify-center min-h-[48px] rounded-xl border px-0.5 py-1 text-[9px] uppercase tracking-wider transition active:scale-95 ${
                   isActive
-                    ? "border-[rgba(241,235,220,0.32)] bg-[rgba(241,235,220,0.14)] text-[var(--ivory)]"
-                    : "border-white/10 bg-white/[0.03] text-[var(--ivory-muted)]"
+                    ? "border-primary bg-primary/25 text-primary shadow-[0_0_12px_var(--theme-glow)] font-bold"
+                    : "border-white/10 bg-white/5 text-muted"
                 }`}
-                aria-pressed={isActive}
               >
-                {tab.label}
+                <span className="text-xs">{tab.icon}</span>
+                <span className="mt-0.5 font-display text-[8px]">{tab.label}</span>
               </button>
             );
           })}
-
-          <button
-            type="button"
-            onClick={() => void toggleWakeLock()}
-            className="min-h-[48px] rounded-[1.2rem] border border-white/10 bg-white/[0.03] px-0.5 text-[8px] uppercase tracking-[0.12em] text-[var(--ivory)] transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-            aria-pressed={wakeLockEnabled}
-            disabled={!wakeLockSupported}
-          >
-            {wakeLockSupported ? (wakeLockActive ? "AÇIK" : "EKRAN") : "YOK"}
-          </button>
         </div>
       </div>
     </main>

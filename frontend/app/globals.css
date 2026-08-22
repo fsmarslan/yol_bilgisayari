@@ -3,16 +3,139 @@
 @tailwind utilities;
 
 :root {
-  --black: #000000;
-  --ivory: #f1ebdc;
-  --ivory-muted: #aca38f;
+  --bg-pure: #060709;
+  --bg-card: rgba(14, 18, 26, 0.75);
+  --bg-card-hover: rgba(22, 28, 40, 0.85);
+  --border-card: rgba(0, 240, 255, 0.15);
+  --theme-primary: #00f0ff;
+  --theme-secondary: #0ea5e9;
+  --theme-glow: rgba(0, 240, 255, 0.25);
+  --text-main: #f0f6fc;
+  --text-muted: #8b949e;
+  --rpm-normal: #00f0ff;
+  --rpm-warn: #fbbf24;
+  --rpm-redline: #ef4444;
 }
 
-.ivory-glow {
+[data-theme="gr-red"] {
+  --bg-pure: #070607;
+  --bg-card: rgba(22, 14, 16, 0.8);
+  --bg-card-hover: rgba(32, 18, 22, 0.9);
+  --border-card: rgba(255, 42, 59, 0.25);
+  --theme-primary: #ff2a3b;
+  --theme-secondary: #ff5e62;
+  --theme-glow: rgba(255, 42, 59, 0.3);
+  --text-main: #ffffff;
+  --text-muted: #a39598;
+  --rpm-normal: #ffffff;
+  --rpm-warn: #fbbf24;
+  --rpm-redline: #ff2a3b;
+}
+
+[data-theme="amber"] {
+  --bg-pure: #060503;
+  --bg-card: rgba(22, 17, 10, 0.8);
+  --bg-card-hover: rgba(32, 24, 14, 0.9);
+  --border-card: rgba(255, 153, 0, 0.25);
+  --theme-primary: #ff9900;
+  --theme-secondary: #f59e0b;
+  --theme-glow: rgba(255, 153, 0, 0.3);
+  --text-main: #fff7ed;
+  --text-muted: #a89f91;
+  --rpm-normal: #ffb74d;
+  --rpm-warn: #f59e0b;
+  --rpm-redline: #ef4444;
+}
+
+[data-theme="emerald"] {
+  --bg-pure: #030705;
+  --bg-card: rgba(10, 22, 15, 0.8);
+  --bg-card-hover: rgba(14, 32, 22, 0.9);
+  --border-card: rgba(0, 230, 118, 0.22);
+  --theme-primary: #00e676;
+  --theme-secondary: #10b981;
+  --theme-glow: rgba(0, 230, 118, 0.3);
+  --text-main: #f0fdf4;
+  --text-muted: #86a392;
+  --rpm-normal: #00e676;
+  --rpm-warn: #fbbf24;
+  --rpm-redline: #ef4444;
+}
+
+/* Carbon & Honeycomb Texture Pattern */
+.bg-cockpit-grid {
+  background-color: var(--bg-pure);
+  background-image: 
+    radial-gradient(ellipse at 50% 0%, var(--theme-glow), transparent 60%),
+    radial-gradient(circle at 50% 100%, rgba(0, 0, 0, 0.8), transparent 70%),
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 28px 28px, 28px 28px;
+  background-position: 0 0, 0 0, -1px -1px, -1px -1px;
+}
+
+.carbon-pattern {
+  background: 
+    linear-gradient(27deg, #151515 5px, transparent 5px) 0 5px,
+    linear-gradient(207deg, #151515 5px, transparent 5px) 10px 0px,
+    linear-gradient(27deg, #222 5px, transparent 5px) 0px 10px,
+    linear-gradient(207deg, #222 5px, transparent 5px) 10px 5px,
+    linear-gradient(90deg, #1b1b1b 10px, transparent 10px),
+    linear-gradient(#1d1d1d 25%, #1a1a1a 25%, #1a1a1a 50%, transparent 50%, transparent 75%, #242424 75%, #242424);
+  background-size: 20px 20px;
+}
+
+/* Cockpit Glow Filters */
+.cluster-glow {
   text-shadow:
-    0 0 10px rgba(241, 235, 220, 0.1),
-    0 0 22px rgba(241, 235, 220, 0.06);
-  filter: drop-shadow(0 0 12px rgba(241, 235, 220, 0.04));
+    0 0 14px var(--theme-glow),
+    0 0 28px var(--theme-glow);
+  filter: drop-shadow(0 0 10px var(--theme-glow));
+}
+
+.primary-glow {
+  text-shadow: 0 0 16px var(--theme-glow);
+}
+
+.danger-glow {
+  text-shadow: 0 0 16px rgba(239, 68, 68, 0.5);
+  filter: drop-shadow(0 0 10px rgba(239, 68, 68, 0.4));
+}
+
+.warn-glow {
+  text-shadow: 0 0 16px rgba(251, 191, 36, 0.5);
+  filter: drop-shadow(0 0 10px rgba(251, 191, 36, 0.4));
+}
+
+.box-glow {
+  box-shadow: 0 0 30px var(--theme-glow), inset 0 0 20px rgba(0, 0, 0, 0.4);
+}
+
+/* Automotive Beveled Corners */
+.hud-clip {
+  clip-path: polygon(
+    14px 0%, 
+    calc(100% - 14px) 0%, 
+    100% 14px, 
+    100% calc(100% - 14px), 
+    calc(100% - 14px) 100%, 
+    14px 100%, 
+    0% calc(100% - 14px), 
+    0% 14px
+  );
+}
+
+.hud-clip-sm {
+  clip-path: polygon(
+    8px 0%, 
+    calc(100% - 8px) 0%, 
+    100% 8px, 
+    100% calc(100% - 8px), 
+    calc(100% - 8px) 100%, 
+    8px 100%, 
+    0% calc(100% - 8px), 
+    0% 8px
+  );
 }
 
 * {
@@ -23,13 +146,16 @@ html,
 body {
   width: 100%;
   min-height: 100%;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 body {
   margin: 0;
-  color: var(--ivory);
-  background-color: var(--black);
-  font-family: var(--font-body), sans-serif;
+  color: var(--text-main);
+  background-color: var(--bg-pure);
+  font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -39,7 +165,12 @@ h2,
 h3,
 h4,
 h5,
-h6 {
-  font-family: var(--font-display), sans-serif;
-  font-weight: 300;
+h6,
+.font-display {
+  font-family: var(--font-display), monospace, sans-serif;
+  letter-spacing: 0.04em;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }

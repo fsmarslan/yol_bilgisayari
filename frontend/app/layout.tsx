@@ -1,17 +1,17 @@
 import type { Metadata, Viewport } from "next";
-import { Manrope, Sora } from "next/font/google";
+import { Chakra_Petch, Rajdhani } from "next/font/google";
 import "./globals.css";
 
-const displayFont = Sora({
+const displayFont = Chakra_Petch({
   subsets: ["latin"],
   variable: "--font-display",
-  weight: ["300", "400", "500", "600"],
+  weight: ["300", "400", "500", "600", "700"],
 });
 
-const bodyFont = Manrope({
+const bodyFont = Rajdhani({
   subsets: ["latin"],
   variable: "--font-body",
-  weight: ["300", "400", "500", "600"],
+  weight: ["400", "500", "600", "700"],
 });
 
 export const metadata: Metadata = {
