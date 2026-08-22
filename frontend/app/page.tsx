@@ -163,10 +163,10 @@ function formatTimestamp(value: string | null) {
 function estimateGear(speedKmh: number | null, rpm: number | null): string {
   if (!speedKmh || !rpm || speedKmh < 3 || rpm < 600) return "N";
   const ratio = speedKmh / rpm;
-  if (ratio < 0.0115) return "1";
-  if (ratio < 0.020) return "2";
-  if (ratio < 0.031) return "3";
-  if (ratio < 0.043) return "4";
+  if (ratio < 0.0112) return "1";
+  if (ratio < 0.0185) return "2";
+  if (ratio < 0.0270) return "3";
+  if (ratio < 0.0360) return "4";
   return "5";
 }
 
@@ -847,7 +847,7 @@ export default function Home() {
 
   const estimatedHorsepower = useMemo(() => {
     if (estimatedTorqueNm === 0 || rpm === null) return 0;
-    const hp = (estimatedTorqueNm * rpm) / 7127;
+    const hp = (estimatedTorqueNm * rpm) / 7023.5;
     return Math.min(95, Math.round(hp));
   }, [estimatedTorqueNm, rpm]);
 
