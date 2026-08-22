@@ -18,10 +18,12 @@
 
 ## 🌟 Öne Çıkan Özellikler
 
-### 1. 📱 %100 Bağımsız Android Uygulaması (Tek Parça APK)
+### 1. 📱 %100 Bağımsız Android Uygulaması (Tek Parça APK & Arka Plan Desteği)
 - **Harici Sunucu / Python Gerekmez:** Python backend'deki tüm Bluetooth ELM327 haberleşme ve hesaplama mantığı saf **TypeScript** servisine ([`obd-ble.service.ts`](frontend/app/services/obd-ble.service.ts)) taşınmıştır.
-- **Offline & Bağımsız:** İnternet, Wi-Fi veya bilgisayar bağlantısı gerekmez; telefonun kendi Bluetooth çipi doğrudan araçtaki `OBD BLE` adaptörüne bağlanır.
-- **Ekran Uyanık Tutma (Screen WakeLock):** Sürüş boyunca telefon ekranının kapanmasını engeller.
+- **Kesintisiz Arka Plan Modu (Foreground Service):** Telefon kilitliyken veya başka navigasyon / müzik uygulamaları (Google Haritalar, Yandex, Spotify) açıkken Bluetooth OBD-II okumaya, Trip tüketimini toplamaya ve GPS rotasını kaydetmeye devam eder.
+- **Canlı Durum Çubuğu Bildirimi:** Android bildirim merkezinde ve kilit ekranında anlık hız, anlık yakıt, trip mesafesi ve toplam masrafı canlı gösterir.
+- **Doze Modu & Pil Koruması:** Android'in derin uykuya alıp uygulamayı kapatmasını önleyen pil optimizasyonu muafiyet yönetimi.
+- **Ekran Uyanık Tutma (Screen WakeLock):** Kokpit modunda sürüş boyunca ekranın kapanmasını engeller.
 
 ### 2. 🛢️ Dizel Motor Termodinamik Yakıt Hesaplama Motoru
 Dizel motorlar benzinli araçlar gibi sabit 14.7:1 AFR ile çalışmaz; daima aşırı hava (fakir karışım) ile çalışır. Sistemimiz 1ND-TV motor karakteristiğine göre kalibre edilmiştir:

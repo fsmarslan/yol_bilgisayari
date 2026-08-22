@@ -5,6 +5,7 @@ import useSWR from "swr";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { obdBleService, type TelemetryState } from "./services/obd-ble.service";
+import { backgroundService } from "./services/background.service";
 import TripRouteMap, { type GpsPoint } from "./components/TripRouteMap";
 
 type DashboardTab = "surus" | "trip" | "performans" | "motor" | "saglik";
@@ -556,6 +557,12 @@ export default function Home() {
   const [wakeLockSupported, setWakeLockSupported] = useState(false);
   const [wakeLockActive, setWakeLockActive] = useState(false);
   const wakeLockRef = useRef<ScreenWakeLock | null>(null);
+
+  // Arka Plan Servisi & Pil Koruması State'leri
+  const [bgServiceEnabled, setBgServiceEnabled] = useState(true);
+  const [bgServiceActive, setBgServiceActive] = useState(false);
+  const [isIgnoringBattery, setIsIgnoringBattery] = useState<boolean | null>(null);
+
   const isLandscape = useLandscape();
   const isPortrait = !isLandscape;
 
@@ -1175,6 +1182,78 @@ export default function Home() {
     setWakeLockEnabled((prev) => !prev);
   };
 
+  // ----------------------------------------------------
+  // ARKA PLAN FOREGROUND SERVICE & PİL KORUMASI
+  // ----------------------------------------------------
+  useEffect(() => {
+    if (isNative) {
+      void backgroundService.checkBatteryOptimization().then(setIsIgnoringBattery);
+      void backgroundService.isServiceActive().then(setBgServiceActive);
+    }
+  }, [isNative]);
+
+  // Bağlantı kurulduğunda veya demo modunda Arka Plan Servisini otomatik başlat
+  useEffect(() => {
+    if (bgServiceEnabled && (data?.connected || demoMode)) {
+      void backgroundService
+        .start(
+          "AuraDrive Pro — Sürüş Aktif ⚡",
+          "Telemetri ve yol bilgisayarı arka planda çalışıyor..."
+        )
+        .then((active) => {
+          setBgServiceActive(active);
+        });
+    } else if (!bgServiceEnabled && bgServiceActive) {
+      void backgroundService.stop().then(() => {
+        setBgServiceActive(false);
+      });
+    }
+  }, [data?.connected, demoMode, bgServiceEnabled, bgServiceActive]);
+
+  // Arka Plan Bildirimini Canlı Sürüş Verileriyle Güncelle
+  useEffect(() => {
+    if (!bgServiceActive || (!data?.connected && !demoMode)) return;
+
+    const speed = Math.round(data?.speed_kmh ?? 0);
+    const fuelStr =
+      data?.fuel_display !== null && data?.fuel_display !== undefined
+        ? `${data.fuel_display.toFixed(1)} ${data.fuel_unit}`
+        : "--";
+    const distStr = `${trip.distanceKm.toFixed(1)} km`;
+    const durationStr = formatTrip(trip.durationMs);
+    const costStr =
+      trip.fuelLiters > 0 ? ` • ${(trip.fuelLiters * fuelPrice).toFixed(1)} ₺` : "";
+
+    const title = `AuraDrive Pro — ${speed} km/h ${speed > 0 ? "🚗" : "🅿️"}`;
+    const body = `⛽ ${fuelStr} • 📍 ${distStr} • ⏱️ ${durationStr}${costStr}`;
+
+    void backgroundService.updateNotification(title, body);
+  }, [
+    bgServiceActive,
+    data?.speed_kmh,
+    data?.fuel_display,
+    data?.fuel_unit,
+    trip.distanceKm,
+    trip.durationMs,
+    trip.fuelLiters,
+    fuelPrice,
+    data?.connected,
+    demoMode,
+  ]);
+
+  const toggleBackgroundService = async () => {
+    const next = !bgServiceEnabled;
+    setBgServiceEnabled(next);
+    if (!next) {
+      await backgroundService.stop();
+      setBgServiceActive(false);
+    } else {
+      const ok = await backgroundService.start();
+      setBgServiceActive(ok);
+    }
+  };
+
+
   const boostPercent = Math.max(0, Math.min(100, (((turboBoost ?? 0) + 0.2) / 1.7) * 100));
   const torquePercent = Math.max(0, Math.min(100, (estimatedTorqueNm / 190) * 100));
   const hpPercent = Math.max(0, Math.min(100, (estimatedHorsepower / 90) * 100));
@@ -1266,6 +1345,21 @@ export default function Home() {
               >
                 <span>📱</span>
                 <span>{wakeLockActive ? "AÇIK" : "KİLİT"}</span>
+              </button>
+
+              {/* Arka Plan Servisi (Foreground Service) Butonu */}
+              <button
+                type="button"
+                onClick={() => void toggleBackgroundService()}
+                className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider transition active:scale-95 ${
+                  bgServiceActive
+                    ? "border-emerald-500/50 bg-emerald-500/20 text-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.3)]"
+                    : "border-white/10 bg-white/5 text-muted"
+                }`}
+                title="Arka planda kesintisiz telemetri ve trip kaydı (Foreground Service)"
+              >
+                <span>🔄</span>
+                <span>{bgServiceActive ? "ARKAPLAN: AÇIK" : "ARKAPLAN"}</span>
               </button>
 
               {/* Mazot Fiyatı Düzenleme Rozeti */}
@@ -2268,6 +2362,71 @@ export default function Home() {
                 </div>
                 <div className="mt-1 text-lg font-bold text-main font-display">
                   {wakeLockActive ? "🟢 Aktif (Ekran Kapanmaz)" : "⚪ Pasif"}
+                </div>
+                <div className="mt-1 text-xs text-muted">
+                  Ön plandayken ekranın kararıp kapanmasını önler
+                </div>
+              </div>
+
+              {/* Arka Plan Foreground Service Durumu */}
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Arka Plan Servisi (Foreground)
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void toggleBackgroundService()}
+                    className={`rounded-lg px-2 py-0.5 text-[9px] font-bold tracking-wider transition ${
+                      bgServiceActive
+                        ? "border border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
+                        : "border border-white/10 bg-white/5 text-muted"
+                    }`}
+                  >
+                    {bgServiceActive ? "KAPAT" : "BAŞLAT"}
+                  </button>
+                </div>
+                <div className="mt-1 text-lg font-bold font-display">
+                  {bgServiceActive ? (
+                    <span className="text-emerald-400">🟢 Çalışıyor (Kalıcı Bildirim)</span>
+                  ) : (
+                    <span className="text-muted">⚪ Pasif</span>
+                  )}
+                </div>
+                <div className="mt-1 text-xs text-muted">
+                  Ekran kilitliyken veya harita açıkken Bluetooth, yakıt ve GPS kaydına devam eder
+                </div>
+              </div>
+
+              {/* Android Pil Optimizasyonu (Doze Koruması) */}
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Android Pil Koruması (Doze)
+                  </div>
+                  {isNative && isIgnoringBattery === false && (
+                    <button
+                      type="button"
+                      onClick={() => void backgroundService.requestBatteryOptimizationExemption()}
+                      className="rounded-lg border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 text-[9px] font-bold tracking-wider text-amber-300 transition hover:bg-amber-500/30 active:scale-95"
+                    >
+                      İSTİSNA TANIMLA ⚙️
+                    </button>
+                  )}
+                </div>
+                <div className="mt-1 text-lg font-bold font-display">
+                  {isIgnoringBattery === true ? (
+                    <span className="text-emerald-400">✅ Muaf (Kısıtlamasız Sürüş)</span>
+                  ) : isIgnoringBattery === false ? (
+                    <span className="text-amber-400">⚠️ Pil Optimizasyonu Aktif</span>
+                  ) : (
+                    <span className="text-muted">📱 Android Servis Kontrolü</span>
+                  )}
+                </div>
+                <div className="mt-1 text-xs text-muted">
+                  {isIgnoringBattery === true
+                    ? "Android telefonunuz uygulamayı arka planda asla uyutmayacak veya kapatmayacak."
+                    : "Samsung / Xiaomi / Huawei gibi cihazlarda arka planda kapanmayı önlemek için muafiyet tanımlayınız."}
                 </div>
               </div>
             </div>
