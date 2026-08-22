@@ -5,9 +5,26 @@ import useSWR from "swr";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { obdBleService, type TelemetryState } from "./services/obd-ble.service";
+import TripRouteMap, { type GpsPoint } from "./components/TripRouteMap";
 
 type DashboardTab = "surus" | "trip" | "performans" | "motor" | "saglik";
 type CockpitTheme = "cyber-cyan" | "gr-red" | "amber" | "emerald";
+
+export type CompletedTrip = {
+  id: string;
+  startTime: number;
+  endTime: number;
+  distanceKm: number;
+  fuelLiters: number;
+  fuelCostTL: number;
+  fuelPrice: number;
+  avgFuelL100km: number | null;
+  avgSpeedKmh: number | null;
+  maxSpeed: number;
+  durationMs: number;
+  movingDurationMs: number;
+  routePoints: GpsPoint[];
+};
 
 type ScreenWakeLock = {
   release: () => Promise<void>;
@@ -83,6 +100,7 @@ const STORAGE_KEY_TRIP = "auradrive_trip_v3";
 const STORAGE_KEY_PERF = "auradrive_perf_v3";
 const STORAGE_KEY_FUEL_PRICE = "auradrive_fuel_price_v3";
 const STORAGE_KEY_THEME = "auradrive_cockpit_theme";
+const STORAGE_KEY_TRIP_HISTORY = "auradrive_trip_history_v1";
 const DEFAULT_FUEL_PRICE = 44.5; // TL / Litre (Euro Diesel)
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8001";
 
@@ -168,6 +186,21 @@ function estimateGear(speedKmh: number | null, rpm: number | null): string {
   if (ratio < 0.0270) return "3";
   if (ratio < 0.0360) return "4";
   return "5";
+}
+
+function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371e3;
+  const p1 = (lat1 * Math.PI) / 180;
+  const p2 = (lat2 * Math.PI) / 180;
+  const dp = ((lat2 - lat1) * Math.PI) / 180;
+  const dl = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dp / 2) * Math.sin(dp / 2) +
+    Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c;
 }
 
 function useLandscape() {
@@ -275,9 +308,8 @@ function RadialGauge({
           transform={`rotate(${startAngle} ${center} ${center})`}
           transition={{ type: "spring", stiffness: 350, damping: 30 }}
           style={{
-            filter: `drop-shadow(0 0 8px ${
-              clampedVal >= (redlineStart ?? Infinity) ? "rgba(239, 68, 68, 0.7)" : "var(--theme-glow)"
-            })`,
+            filter: `drop-shadow(0 0 8px ${clampedVal >= (redlineStart ?? Infinity) ? "rgba(239, 68, 68, 0.7)" : "var(--theme-glow)"
+              })`,
           }}
         />
 
@@ -358,11 +390,10 @@ function SequentialShiftLights({ rpm, activeAlert }: { rpm: number | null; activ
           return (
             <div
               key={idx}
-              className={`h-2.5 flex-1 rounded-sm transition-all duration-75 sm:h-3 ${
-                isActive
+              className={`h-2.5 flex-1 rounded-sm transition-all duration-75 sm:h-3 ${isActive
                   ? `${step.color} ${step.glow} opacity-100 scale-105`
                   : "bg-white/10 opacity-30"
-              } ${isFlashing && isActive ? "animate-pulse" : ""}`}
+                } ${isFlashing && isActive ? "animate-pulse" : ""}`}
             />
           );
         })}
@@ -589,11 +620,126 @@ export default function Home() {
     setFuelPriceInput(String(nextVal));
   };
 
-  // ----------------------------------------------------
-  // TRIP COMPUTER MOTORU
-  // ----------------------------------------------------
   const [trip, setTrip] = useState<TripData>(DEFAULT_TRIP);
+  const [tripHistory, setTripHistory] = useState<CompletedTrip[]>([]);
+  const [tripSubView, setTripSubView] = useState<"current" | "history">("current");
+  const [selectedMapTrip, setSelectedMapTrip] = useState<CompletedTrip | null>(null);
   const lastUpdateRef = useRef<number | null>(null);
+
+  // GPS Geolocation Takibi
+  const [gpsActive, setGpsActive] = useState(false);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
+  const [routePoints, setRoutePoints] = useState<GpsPoint[]>([]);
+  const lastRecordedGpsRef = useRef<GpsPoint | null>(null);
+
+  // Geçmiş Sürüşleri Yükle
+  useEffect(() => {
+    try {
+      const savedHistory = localStorage.getItem(STORAGE_KEY_TRIP_HISTORY);
+      if (savedHistory) {
+        setTripHistory(JSON.parse(savedHistory));
+      }
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  // Canlı GPS Dinleyicisi
+  useEffect(() => {
+    if (typeof window === "undefined" || !("geolocation" in navigator)) {
+      return;
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        setGpsActive(true);
+        setGpsAccuracy(Math.round(position.coords.accuracy));
+        const newPoint: GpsPoint = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          speed: position.coords.speed !== null ? position.coords.speed * 3.6 : (data?.speed_kmh ?? 0),
+          altitude: position.coords.altitude,
+          timestamp: position.timestamp || Date.now(),
+        };
+
+        const last = lastRecordedGpsRef.current;
+        let shouldRecord = false;
+
+        if (!last) {
+          shouldRecord = true;
+        } else {
+          const dist = calculateDistanceMeters(last.lat, last.lng, newPoint.lat, newPoint.lng);
+          const timeDiff = newPoint.timestamp - last.timestamp;
+          if (dist >= 8 || (dist >= 3 && timeDiff >= 5000)) {
+            shouldRecord = true;
+          }
+        }
+
+        if (shouldRecord) {
+          lastRecordedGpsRef.current = newPoint;
+          setRoutePoints((prev) => [...prev, newPoint]);
+        }
+      },
+      (err) => {
+        console.warn("GPS konum uyarısı:", err.message);
+        setGpsActive(false);
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 2000,
+        timeout: 10000,
+      }
+    );
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [data?.speed_kmh]);
+
+  // Demo Modunda Gerçekçi GPS Rotası Üret
+  useEffect(() => {
+    if (!demoMode) return;
+    setGpsActive(true);
+    setGpsAccuracy(5);
+    // İstanbul Sahil Yolu (Sarayburnu - Beşiktaş güzergahı)
+    const baseLat = 41.0082;
+    const baseLng = 28.9784;
+    const simPoints: GpsPoint[] = [
+      { lat: baseLat, lng: baseLng, speed: 0, timestamp: Date.now() - 600000 },
+      { lat: baseLat + 0.004, lng: baseLng + 0.006, speed: 35, timestamp: Date.now() - 480000 },
+      { lat: baseLat + 0.009, lng: baseLng + 0.012, speed: 65, timestamp: Date.now() - 360000 },
+      { lat: baseLat + 0.016, lng: baseLng + 0.021, speed: 85, timestamp: Date.now() - 240000 },
+      { lat: baseLat + 0.024, lng: baseLng + 0.031, speed: 90, timestamp: Date.now() - 120000 },
+      { lat: baseLat + 0.032, lng: baseLng + 0.042, speed: 0, timestamp: Date.now() },
+    ];
+    setRoutePoints(simPoints);
+
+    // Eğer geçmişte hiç kayıt yoksa demo bir sürüş ekle
+    try {
+      const savedHistory = localStorage.getItem(STORAGE_KEY_TRIP_HISTORY);
+      if (!savedHistory || JSON.parse(savedHistory).length === 0) {
+        const demoTrip: CompletedTrip = {
+          id: "demo_trip_1",
+          startTime: Date.now() - 3600000,
+          endTime: Date.now() - 1800000,
+          distanceKm: 18.4,
+          fuelLiters: 0.88,
+          fuelCostTL: 39.16,
+          fuelPrice: 44.5,
+          avgFuelL100km: 4.78,
+          avgSpeedKmh: 61,
+          maxSpeed: 104,
+          durationMs: 1800000,
+          movingDurationMs: 1650000,
+          routePoints: simPoints,
+        };
+        setTripHistory([demoTrip]);
+        localStorage.setItem(STORAGE_KEY_TRIP_HISTORY, JSON.stringify([demoTrip]));
+      }
+    } catch {
+      // Ignore
+    }
+  }, [demoMode]);
 
   useEffect(() => {
     try {
@@ -663,7 +809,38 @@ export default function Home() {
     });
   }, [data]);
 
+  const archiveCurrentTrip = () => {
+    if (trip.distanceKm < 0.05 && routePoints.length < 2) return;
+    const completed: CompletedTrip = {
+      id: "trip_" + Date.now(),
+      startTime: trip.startTime || Date.now() - trip.durationMs,
+      endTime: Date.now(),
+      distanceKm: Math.round(trip.distanceKm * 100) / 100,
+      fuelLiters: Math.round(trip.fuelLiters * 100) / 100,
+      fuelCostTL: Math.round(tripTotalCostTL * 100) / 100,
+      fuelPrice: fuelPrice,
+      avgFuelL100km: avgFuelL100km ? Math.round(avgFuelL100km * 100) / 100 : null,
+      avgSpeedKmh: avgSpeedKmh ? Math.round(avgSpeedKmh) : null,
+      maxSpeed: Math.round(trip.maxSpeed),
+      durationMs: trip.durationMs,
+      movingDurationMs: trip.movingDurationMs,
+      routePoints: [...routePoints],
+    };
+
+    const updatedHistory = [completed, ...tripHistory];
+    setTripHistory(updatedHistory);
+    try {
+      localStorage.setItem(STORAGE_KEY_TRIP_HISTORY, JSON.stringify(updatedHistory));
+    } catch {
+      // Ignore
+    }
+  };
+
   const resetTrip = () => {
+    if (trip.distanceKm >= 0.05 || routePoints.length >= 2) {
+      archiveCurrentTrip();
+    }
+
     const fresh: TripData = {
       distanceKm: 0,
       fuelLiters: 0,
@@ -673,12 +850,49 @@ export default function Home() {
       startTime: Date.now(),
     };
     setTrip(fresh);
+    setRoutePoints([]);
+    lastRecordedGpsRef.current = null;
     lastUpdateRef.current = null;
     try {
       localStorage.setItem(STORAGE_KEY_TRIP, JSON.stringify(fresh));
     } catch {
       // Clear error
     }
+  };
+
+  const deleteTrip = (id: string) => {
+    const updated = tripHistory.filter((t) => t.id !== id);
+    setTripHistory(updated);
+    try {
+      localStorage.setItem(STORAGE_KEY_TRIP_HISTORY, JSON.stringify(updated));
+    } catch {
+      // Ignore
+    }
+    if (selectedMapTrip?.id === id) {
+      setSelectedMapTrip(null);
+    }
+  };
+
+  const clearAllTripHistory = () => {
+    if (typeof window !== "undefined" && window.confirm("Tüm geçmiş sürüş kayıtları silinsin mi?")) {
+      setTripHistory([]);
+      try {
+        localStorage.removeItem(STORAGE_KEY_TRIP_HISTORY);
+      } catch {
+        // Ignore
+      }
+    }
+  };
+
+  const exportTripHistoryJson = () => {
+    if (typeof window === "undefined" || tripHistory.length === 0) return;
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(tripHistory, null, 2));
+    const downloadAnchor = document.createElement("a");
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `auradrive_trips_${new Date().toISOString().slice(0, 10)}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
   };
 
   // ----------------------------------------------------
@@ -997,36 +1211,33 @@ export default function Home() {
             <div className="flex items-center gap-1.5 sm:gap-2">
               {/* BLE Bağlantı Işığı */}
               <div
-                className={`flex items-center gap-1 rounded-full border px-2 py-1 text-[9px] font-semibold tracking-wider ${
-                  data?.connected
+                className={`flex items-center gap-1 rounded-full border px-2 py-1 text-[9px] font-semibold tracking-wider ${data?.connected
                     ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
                     : error
                       ? "border-red-500/40 bg-red-500/15 text-red-300"
                       : "border-amber-500/40 bg-amber-500/15 text-amber-300"
-                }`}
+                  }`}
                 title={data?.connected ? "OBD-II Canlı Akış" : "Bağlantı Bekleniyor"}
               >
                 <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    data?.connected
+                  className={`h-1.5 w-1.5 rounded-full ${data?.connected
                       ? "bg-emerald-400 animate-pulse"
                       : error
                         ? "bg-red-400"
                         : "bg-amber-400 animate-ping"
-                  }`}
+                    }`}
                 />
                 <span>{data?.connected ? "OBD-II CANLI" : error ? "KOPUK" : "BAĞLANIYOR"}</span>
               </div>
 
               {/* Hararet Uyarısı İkonu */}
               <div
-                className={`flex h-7 w-7 items-center justify-center rounded-lg border text-xs ${
-                  coolant !== null && coolant >= 98
+                className={`flex h-7 w-7 items-center justify-center rounded-lg border text-xs ${coolant !== null && coolant >= 98
                     ? "border-red-500 bg-red-500/20 text-red-400 animate-bounce"
                     : coolant !== null && coolant < 70
                       ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-300"
                       : "border-white/10 bg-white/5 text-muted"
-                }`}
+                  }`}
                 title={`Motor Sıcaklığı: ${coolant ?? "--"}°C`}
               >
                 🌡️
@@ -1034,11 +1245,10 @@ export default function Home() {
 
               {/* MIL / Arıza Lambası İkonu */}
               <div
-                className={`flex h-7 w-7 items-center justify-center rounded-lg border text-xs ${
-                  (data?.distance_mil_on ?? 0) > 0
+                className={`flex h-7 w-7 items-center justify-center rounded-lg border text-xs ${(data?.distance_mil_on ?? 0) > 0
                     ? "border-amber-500 bg-amber-500/20 text-amber-300 animate-pulse"
                     : "border-white/10 bg-white/5 text-muted opacity-40"
-                }`}
+                  }`}
                 title="Motor Arıza Lambası (MIL)"
               >
                 ⚠️
@@ -1048,11 +1258,10 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => void toggleWakeLock()}
-                className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider transition active:scale-95 ${
-                  wakeLockActive
+                className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider transition active:scale-95 ${wakeLockActive
                     ? "border-primary bg-primary/20 text-primary shadow-[0_0_12px_var(--theme-glow)]"
                     : "border-white/10 bg-white/5 text-muted"
-                }`}
+                  }`}
                 title="Ekranı sürekli açık tutma kilidi"
               >
                 <span>📱</span>
@@ -1070,16 +1279,28 @@ export default function Home() {
                 <span>{fuelPrice.toFixed(2)} ₺</span>
               </button>
 
+              {/* GPS Durumu Rozeti */}
+              <div
+                className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider ${
+                  gpsActive
+                    ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.2)]"
+                    : "border-white/10 bg-white/5 text-muted opacity-50"
+                }`}
+                title={gpsActive ? `GPS Aktif (Hassasiyet: ±${gpsAccuracy ?? 5}m, ${routePoints.length} rota noktası)` : "GPS Aranıyor / Kapalı"}
+              >
+                <span>🛰️</span>
+                <span>{gpsActive ? `GPS ${routePoints.length > 0 ? `(${routePoints.length})` : "AKTİF"}` : "GPS"}</span>
+              </div>
+
               {/* Masaüstü Simülasyon Butonu */}
               {!isNative && (
                 <button
                   type="button"
                   onClick={() => setDemoMode((prev) => !prev)}
-                  className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider transition active:scale-95 ${
-                    demoMode
+                  className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider transition active:scale-95 ${demoMode
                       ? "border-emerald-400 bg-emerald-400/20 text-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.3)]"
                       : "border-white/10 bg-white/5 text-muted"
-                  }`}
+                    }`}
                   title="Masaüstü test simülasyonunu aç/kapat"
                 >
                   <span>🎮</span>
@@ -1093,41 +1314,37 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => changeTheme("cyber-cyan")}
-                className={`h-6 w-6 rounded-lg border transition ${
-                  theme === "cyber-cyan"
+                className={`h-6 w-6 rounded-lg border transition ${theme === "cyber-cyan"
                     ? "border-cyan-400 bg-cyan-400/30 shadow-[0_0_8px_#00f0ff]"
                     : "border-transparent bg-cyan-950/40 opacity-50"
-                }`}
+                  }`}
                 title="Cyber Cyan Teması"
               />
               <button
                 type="button"
                 onClick={() => changeTheme("gr-red")}
-                className={`h-6 w-6 rounded-lg border transition ${
-                  theme === "gr-red"
+                className={`h-6 w-6 rounded-lg border transition ${theme === "gr-red"
                     ? "border-red-500 bg-red-500/30 shadow-[0_0_8px_#ff2a3b]"
                     : "border-transparent bg-red-950/40 opacity-50"
-                }`}
+                  }`}
                 title="GR Sport Red Teması"
               />
               <button
                 type="button"
                 onClick={() => changeTheme("amber")}
-                className={`h-6 w-6 rounded-lg border transition ${
-                  theme === "amber"
+                className={`h-6 w-6 rounded-lg border transition ${theme === "amber"
                     ? "border-amber-500 bg-amber-500/30 shadow-[0_0_8px_#ff9900]"
                     : "border-transparent bg-amber-950/40 opacity-50"
-                }`}
+                  }`}
                 title="Amber Gece Teması"
               />
               <button
                 type="button"
                 onClick={() => changeTheme("emerald")}
-                className={`h-6 w-6 rounded-lg border transition ${
-                  theme === "emerald"
+                className={`h-6 w-6 rounded-lg border transition ${theme === "emerald"
                     ? "border-emerald-400 bg-emerald-400/30 shadow-[0_0_8px_#00e676]"
                     : "border-transparent bg-emerald-950/40 opacity-50"
-                }`}
+                  }`}
                 title="Emerald Track Teması"
               />
             </div>
@@ -1144,13 +1361,12 @@ export default function Home() {
               initial={{ opacity: 0, height: 0, y: -8 }}
               animate={{ opacity: 1, height: "auto", y: 0 }}
               exit={{ opacity: 0, height: 0, y: -8 }}
-              className={`rounded-2xl border px-4 py-2.5 backdrop-blur-md ${
-                smartAlert.type === "danger"
+              className={`rounded-2xl border px-4 py-2.5 backdrop-blur-md ${smartAlert.type === "danger"
                   ? "border-red-500/50 bg-red-500/15 text-red-200 shadow-[0_0_20px_rgba(239,68,68,0.25)]"
                   : smartAlert.type === "warning"
                     ? "border-amber-400/50 bg-amber-400/15 text-amber-200 shadow-[0_0_20px_rgba(251,191,36,0.2)]"
                     : "border-emerald-400/50 bg-emerald-400/15 text-emerald-200 shadow-[0_0_20px_rgba(16,185,129,0.2)]"
-              }`}
+                }`}
             >
               <div className="flex items-center gap-2 font-display text-xs font-bold uppercase tracking-wider">
                 <span>{smartAlert.type === "danger" ? "🚨" : smartAlert.type === "warning" ? "⚠️" : "💡"}</span>
@@ -1255,11 +1471,10 @@ export default function Home() {
                     key={tab.id}
                     type="button"
                     onClick={() => setActiveTab(tab.id)}
-                    className={`rounded-xl border py-1.5 text-center text-[10px] font-bold uppercase tracking-wider transition ${
-                      activeTab === tab.id
+                    className={`rounded-xl border py-1.5 text-center text-[10px] font-bold uppercase tracking-wider transition ${activeTab === tab.id
                         ? "border-primary bg-primary/20 text-primary shadow-[0_0_12px_var(--theme-glow)]"
                         : "border-white/10 bg-white/5 text-muted hover:bg-white/10"
-                    }`}
+                      }`}
                   >
                     {tab.label}
                   </button>
@@ -1427,11 +1642,10 @@ export default function Home() {
                   key={tab.id}
                   type="button"
                   onClick={() => setActiveTab(tab.id)}
-                  className={`min-h-[46px] rounded-2xl border px-1 py-1.5 text-center transition active:scale-95 ${
-                    isActive
+                  className={`min-h-[46px] rounded-2xl border px-1 py-1.5 text-center transition active:scale-95 ${isActive
                       ? "border-primary bg-primary/20 text-primary shadow-[0_0_16px_var(--theme-glow)] font-bold"
                       : "border-white/10 bg-black/30 text-muted hover:bg-white/5"
-                  }`}
+                    }`}
                 >
                   <div className="text-xs">{tab.icon}</div>
                   <div className="mt-0.5 text-[9px] uppercase tracking-wider font-display sm:text-[10px]">
@@ -1501,93 +1715,327 @@ export default function Home() {
             </div>
           )}
 
-          {/* SEKME 2: TRİP (YOL BİLGİSAYARI) */}
+          {/* SEKME 2: TRİP (YOL BİLGİSAYARI & GEÇMİŞ SÜRÜŞLER) */}
           {activeTab === "trip" && (
             <div className="flex flex-col gap-3">
-              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Kat Edilen Yol
-                  </div>
-                  <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
-                    <SmoothNumber value={trip.distanceKm} digits={2} /> <span className="text-xs text-primary">KM</span>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Harcanan Mazot
-                  </div>
-                  <div className="mt-1 text-2xl font-bold text-amber-300 font-display tabular-nums">
-                    <SmoothNumber value={trip.fuelLiters} digits={2} /> <span className="text-xs text-amber-400">L</span>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Toplam Yakıt Masrafı
-                  </div>
-                  <div className="mt-1 text-2xl font-bold text-emerald-400 font-display tabular-nums">
-                    <SmoothNumber value={tripTotalCostTL} digits={2} /> <span className="text-xs text-emerald-500">₺</span>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Ortalama Tüketim
-                  </div>
-                  <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
-                    <SmoothNumber value={avgFuelL100km} digits={2} /> <span className="text-xs text-primary">L/100km</span>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Ortalama Hız
-                  </div>
-                  <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
-                    <SmoothNumber value={avgSpeedKmh} digits={0} /> <span className="text-xs text-primary">KM/H</span>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Maksimum Hız
-                  </div>
-                  <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
-                    <SmoothNumber value={trip.maxSpeed} digits={0} /> <span className="text-xs text-primary">KM/H</span>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Sürüş Süresi
-                  </div>
-                  <div className="mt-1 text-xl font-bold text-main font-display tabular-nums">
-                    {formatTrip(trip.durationMs)}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Hareket Süresi
-                  </div>
-                  <div className="mt-1 text-xl font-bold text-main font-display tabular-nums">
-                    {formatTrip(trip.movingDurationMs)}
-                  </div>
-                </div>
-              </div>
-
-              {/* Trip Butonları */}
-              <div className="flex flex-wrap gap-2">
+              {/* Alt Sekme Seçici: Güncel Sürüş vs Geçmiş Sürüşler */}
+              <div className="flex items-center gap-1 rounded-2xl border border-card-border bg-card p-1">
                 <button
                   type="button"
-                  onClick={resetTrip}
-                  className="flex-1 rounded-2xl border border-red-500/40 bg-red-500/15 py-3 text-xs font-bold uppercase tracking-widest text-red-200 transition hover:bg-red-500/25 active:scale-98"
+                  onClick={() => setTripSubView("current")}
+                  className={`flex-1 rounded-xl py-2 text-xs font-bold uppercase tracking-wider transition ${
+                    tripSubView === "current"
+                      ? "border border-primary/50 bg-primary/20 text-primary shadow-[0_0_12px_var(--theme-glow)]"
+                      : "text-muted hover:text-main"
+                  }`}
                 >
-                  🔄 Yeni Sürüş Başlat / Trip Sıfırla
+                  📊 Güncel Sürüş
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTripSubView("history")}
+                  className={`flex-1 rounded-xl py-2 text-xs font-bold uppercase tracking-wider transition flex items-center justify-center gap-1.5 ${
+                    tripSubView === "history"
+                      ? "border border-primary/50 bg-primary/20 text-primary shadow-[0_0_12px_var(--theme-glow)]"
+                      : "text-muted hover:text-main"
+                  }`}
+                >
+                  <span>🗂️ Geçmiş Sürüşler</span>
+                  {tripHistory.length > 0 && (
+                    <span className="rounded-full bg-primary/20 px-1.5 py-0.5 text-[9px] font-extrabold text-primary">
+                      {tripHistory.length}
+                    </span>
+                  )}
                 </button>
               </div>
+
+              {/* 1. GÜNCEL SÜRÜŞ GÖRÜNÜMÜ */}
+              {tripSubView === "current" && (
+                <div className="flex flex-col gap-3">
+                  <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Kat Edilen Yol
+                      </div>
+                      <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                        <SmoothNumber value={trip.distanceKm} digits={2} /> <span className="text-xs text-primary">KM</span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Harcanan Mazot
+                      </div>
+                      <div className="mt-1 text-2xl font-bold text-amber-300 font-display tabular-nums">
+                        <SmoothNumber value={trip.fuelLiters} digits={2} /> <span className="text-xs text-amber-400">L</span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Toplam Yakıt Masrafı
+                      </div>
+                      <div className="mt-1 text-2xl font-bold text-emerald-400 font-display tabular-nums">
+                        <SmoothNumber value={tripTotalCostTL} digits={2} /> <span className="text-xs text-emerald-500">₺</span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Ortalama Tüketim
+                      </div>
+                      <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                        <SmoothNumber value={avgFuelL100km} digits={2} /> <span className="text-xs text-primary">L/100km</span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Ortalama Hız
+                      </div>
+                      <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                        <SmoothNumber value={avgSpeedKmh} digits={0} /> <span className="text-xs text-primary">KM/H</span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Maksimum Hız
+                      </div>
+                      <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
+                        <SmoothNumber value={trip.maxSpeed} digits={0} /> <span className="text-xs text-primary">KM/H</span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Sürüş Süresi
+                      </div>
+                      <div className="mt-1 text-xl font-bold text-main font-display tabular-nums">
+                        {formatTrip(trip.durationMs)}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Hareket Süresi
+                      </div>
+                      <div className="mt-1 text-xl font-bold text-main font-display tabular-nums">
+                        {formatTrip(trip.movingDurationMs)}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Canlı GPS Güzergahı Kartı */}
+                  <div className="flex flex-col justify-between gap-3 rounded-2xl border border-card-border bg-card p-3.5 shadow-md sm:flex-row sm:items-center">
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-2xl">🗺️</span>
+                      <div>
+                        <div className="text-xs font-bold text-main font-display">
+                          Canlı GPS Güzergah Takibi
+                        </div>
+                        <div className="text-[10px] text-muted">
+                          {gpsActive
+                            ? `${routePoints.length} GPS noktası kaydedildi (Hassasiyet: ±${gpsAccuracy ?? 5}m)`
+                            : "GPS sinyali aranıyor..."}
+                        </div>
+                      </div>
+                    </div>
+
+                    {routePoints.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSelectedMapTrip({
+                            id: "live_trip_temp",
+                            startTime: trip.startTime,
+                            endTime: Date.now(),
+                            distanceKm: trip.distanceKm,
+                            fuelLiters: trip.fuelLiters,
+                            fuelCostTL: tripTotalCostTL,
+                            fuelPrice: fuelPrice,
+                            avgFuelL100km: avgFuelL100km,
+                            avgSpeedKmh: avgSpeedKmh,
+                            maxSpeed: trip.maxSpeed,
+                            durationMs: trip.durationMs,
+                            movingDurationMs: trip.movingDurationMs,
+                            routePoints: routePoints,
+                          })
+                        }
+                        className="flex items-center justify-center gap-1.5 rounded-xl border border-primary/40 bg-primary/15 px-4 py-2 text-xs font-bold text-primary transition hover:bg-primary/25 active:scale-95 shadow-[0_0_10px_var(--theme-glow)]"
+                      >
+                        <span>🗺️</span>
+                        <span>Haritada Canlı Gör</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Trip İşlem Butonları */}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={archiveCurrentTrip}
+                      disabled={trip.distanceKm < 0.05 && routePoints.length < 2}
+                      className="flex-1 rounded-2xl border border-emerald-500/40 bg-emerald-500/15 py-3 text-xs font-bold uppercase tracking-widest text-emerald-200 transition hover:bg-emerald-500/25 active:scale-98 disabled:opacity-40"
+                    >
+                      💾 Sürüşü Geçmişe Kaydet
+                    </button>
+                    <button
+                      type="button"
+                      onClick={resetTrip}
+                      className="flex-1 rounded-2xl border border-red-500/40 bg-red-500/15 py-3 text-xs font-bold uppercase tracking-widest text-red-200 transition hover:bg-red-500/25 active:scale-98"
+                    >
+                      🔄 Yeni Sürüş Başlat / Sıfırla
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* 2. GEÇMİŞ SÜRÜŞLER LİSTESİ */}
+              {tripSubView === "history" && (
+                <div className="flex flex-col gap-3">
+                  {tripHistory.length > 0 ? (
+                    <div className="flex flex-col gap-3">
+                      {/* Toplam Özet Kartı */}
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 rounded-2xl border border-primary/20 bg-primary/5 p-3">
+                        <div>
+                          <div className="text-[9px] uppercase tracking-wider text-muted">Toplam Sürüş</div>
+                          <div className="text-xl font-bold text-main font-display">{tripHistory.length} Adet</div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] uppercase tracking-wider text-muted">Toplam Mesafe</div>
+                          <div className="text-xl font-bold text-primary font-display">
+                            {tripHistory.reduce((acc, t) => acc + t.distanceKm, 0).toFixed(1)} KM
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] uppercase tracking-wider text-muted">Toplam Yakıt</div>
+                          <div className="text-xl font-bold text-amber-300 font-display">
+                            {tripHistory.reduce((acc, t) => acc + t.fuelLiters, 0).toFixed(1)} L
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] uppercase tracking-wider text-muted">Toplam Tutar</div>
+                          <div className="text-xl font-bold text-emerald-400 font-display">
+                            {tripHistory.reduce((acc, t) => acc + t.fuelCostTL, 0).toFixed(2)} ₺
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Üst İşlem Butonları */}
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={exportTripHistoryJson}
+                          className="flex items-center gap-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[10px] font-bold text-muted transition hover:bg-white/10 active:scale-95"
+                        >
+                          <span>📥</span>
+                          <span>JSON İndir</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={clearAllTripHistory}
+                          className="flex items-center gap-1 rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-1.5 text-[10px] font-bold text-red-300 transition hover:bg-red-500/20 active:scale-95"
+                        >
+                          <span>🗑️</span>
+                          <span>Tüm Geçmişi Sil</span>
+                        </button>
+                      </div>
+
+                      {/* Sürüş Kartları */}
+                      <div className="flex flex-col gap-2.5">
+                        {tripHistory.map((hTrip) => (
+                          <div
+                            key={hTrip.id}
+                            className="flex flex-col gap-2.5 rounded-2xl border border-card-border bg-card p-3.5 shadow-lg backdrop-blur-md"
+                          >
+                            <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-base">📅</span>
+                                <div>
+                                  <div className="text-xs font-bold text-main font-display">
+                                    {new Date(hTrip.startTime).toLocaleDateString("tr-TR", {
+                                      day: "numeric",
+                                      month: "long",
+                                      year: "numeric",
+                                    })}
+                                  </div>
+                                  <div className="text-[10px] text-muted">
+                                    Saat: {new Date(hTrip.startTime).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}
+                                    {" - "}
+                                    {new Date(hTrip.endTime).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => deleteTrip(hTrip.id)}
+                                className="rounded-lg p-1.5 text-muted hover:bg-red-500/20 hover:text-red-300 active:scale-90 transition"
+                                title="Bu sürüşü sil"
+                              >
+                                🗑️
+                              </button>
+                            </div>
+
+                            {/* Sürüş Veri Izgarası */}
+                            <div className="grid grid-cols-3 gap-2 sm:grid-cols-6 text-center">
+                              <div className="rounded-xl border border-white/5 bg-black/30 p-2">
+                                <div className="text-[9px] text-muted uppercase">Mesafe</div>
+                                <div className="text-sm font-bold text-primary font-display">{hTrip.distanceKm.toFixed(1)} KM</div>
+                              </div>
+                              <div className="rounded-xl border border-white/5 bg-black/30 p-2">
+                                <div className="text-[9px] text-muted uppercase">Harcanan</div>
+                                <div className="text-sm font-bold text-amber-300 font-display">{hTrip.fuelLiters.toFixed(2)} L</div>
+                              </div>
+                              <div className="rounded-xl border border-white/5 bg-black/30 p-2">
+                                <div className="text-[9px] text-muted uppercase">Tutar</div>
+                                <div className="text-sm font-bold text-emerald-400 font-display">{hTrip.fuelCostTL.toFixed(2)} ₺</div>
+                              </div>
+                              <div className="rounded-xl border border-white/5 bg-black/30 p-2">
+                                <div className="text-[9px] text-muted uppercase">Ort. Tüketim</div>
+                                <div className="text-sm font-bold text-main font-display">
+                                  {hTrip.avgFuelL100km ? `${hTrip.avgFuelL100km.toFixed(1)} L` : "--"}
+                                </div>
+                              </div>
+                              <div className="rounded-xl border border-white/5 bg-black/30 p-2">
+                                <div className="text-[9px] text-muted uppercase">Maks Hız</div>
+                                <div className="text-sm font-bold text-main font-display">{hTrip.maxSpeed} KM/H</div>
+                              </div>
+                              <div className="rounded-xl border border-white/5 bg-black/30 p-2">
+                                <div className="text-[9px] text-muted uppercase">Sürüş Süresi</div>
+                                <div className="text-xs font-bold text-main font-display">{formatTrip(hTrip.durationMs)}</div>
+                              </div>
+                            </div>
+
+                            {/* Harita Butonu */}
+                            <button
+                              type="button"
+                              onClick={() => setSelectedMapTrip(hTrip)}
+                              className="flex items-center justify-center gap-1.5 rounded-xl border border-primary/40 bg-primary/15 py-2 text-xs font-bold text-primary transition hover:bg-primary/25 active:scale-98 shadow-[0_0_10px_var(--theme-glow)]"
+                            >
+                              <span>🗺️</span>
+                              <span>
+                                {hTrip.routePoints && hTrip.routePoints.length > 0
+                                  ? `Güzergahı Haritada Gör (${hTrip.routePoints.length} GPS Noktası)`
+                                  : "Güzergah Haritasını İncele"}
+                              </span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center rounded-2xl border border-white/10 bg-black/40 p-8 text-center text-muted">
+                      <span className="text-4xl">🗂️</span>
+                      <div className="mt-2 text-sm font-bold text-main font-display">Henüz Kayıtlı Geçmiş Sürüş Yok</div>
+                      <p className="mt-1 text-xs max-w-xs">
+                        Sürüşünüz bittiğinde &quot;Sürüşü Geçmişe Kaydet&quot; veya &quot;Trip Sıfırla&quot; butonuna basarak tüm telemetriyi ve GPS güzergahınızı buraya kaydedebilirsiniz.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -1911,9 +2359,9 @@ export default function Home() {
                   </span>
                 </div>
                 <div className="flex justify-between py-0.5">
-                  <span>Tam Depo (45 L):</span>
+                  <span>Tam Depo (55 L):</span>
                   <span className="font-bold text-main tabular-nums">
-                    {((parseFloat(fuelPriceInput) || fuelPrice) * 45).toFixed(2)} ₺
+                    {((parseFloat(fuelPriceInput) || fuelPrice) * 55).toFixed(2)} ₺
                   </span>
                 </div>
               </div>
@@ -1945,6 +2393,92 @@ export default function Home() {
       ) : null}
 
       {/* ========================================================================= */}
+      {/* GPS GÜZERGAH VE HARİTA DETAY MODALI                                      */}
+      {/* ========================================================================= */}
+      {selectedMapTrip ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-3 backdrop-blur-md">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0, y: 10 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            className="flex max-h-[90vh] w-full max-w-2xl flex-col gap-3 overflow-hidden rounded-3xl border border-primary/40 bg-card p-4 shadow-2xl backdrop-blur-xl"
+          >
+            {/* Modal Başlığı */}
+            <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🗺️</span>
+                <div>
+                  <div className="text-sm font-bold text-main font-display">
+                    {new Date(selectedMapTrip.startTime).toLocaleDateString("tr-TR", {
+                      day: "numeric",
+                      month: "long",
+                      year: "numeric",
+                    })}{" "}
+                    - Sürüş Güzergahı
+                  </div>
+                  <div className="text-[10px] text-muted">
+                    {new Date(selectedMapTrip.startTime).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}
+                    {" - "}
+                    {new Date(selectedMapTrip.endTime).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSelectedMapTrip(null)}
+                className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-white/5 text-sm text-muted hover:bg-white/15 hover:text-main"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Hızlı İstatistik Rozetleri */}
+            <div className="grid grid-cols-4 gap-2 text-center text-xs">
+              <div className="rounded-xl border border-white/5 bg-black/40 p-2">
+                <div className="text-[9px] text-muted uppercase">Mesafe</div>
+                <div className="font-bold text-primary font-display">{selectedMapTrip.distanceKm.toFixed(1)} KM</div>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-black/40 p-2">
+                <div className="text-[9px] text-muted uppercase">Tutar</div>
+                <div className="font-bold text-emerald-400 font-display">{selectedMapTrip.fuelCostTL.toFixed(2)} ₺</div>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-black/40 p-2">
+                <div className="text-[9px] text-muted uppercase">Ort. Tüketim</div>
+                <div className="font-bold text-amber-300 font-display">
+                  {selectedMapTrip.avgFuelL100km ? `${selectedMapTrip.avgFuelL100km.toFixed(1)} L` : "--"}
+                </div>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-black/40 p-2">
+                <div className="text-[9px] text-muted uppercase">Süre</div>
+                <div className="font-bold text-main font-display">{formatTrip(selectedMapTrip.durationMs)}</div>
+              </div>
+            </div>
+
+            {/* İnteraktif Koyu Harita */}
+            <div className="flex-1 overflow-hidden">
+              <TripRouteMap
+                points={selectedMapTrip.routePoints || []}
+                themeColor="var(--theme-primary)"
+                height="340px"
+                startLabel="Sürüş Başlangıcı"
+                endLabel="Sürüş Bitişi"
+              />
+            </div>
+
+            {/* Kapat Butonu */}
+            <button
+              type="button"
+              onClick={() => setSelectedMapTrip(null)}
+              className="w-full rounded-2xl border border-white/10 bg-white/10 py-2.5 text-xs font-bold uppercase tracking-wider text-main transition hover:bg-white/15 active:scale-98"
+            >
+              Kapat
+            </button>
+          </motion.div>
+        </div>
+      ) : null}
+
+      {/* ========================================================================= */}
       {/* MOBİL ALT SABİT NAVİGASYON (PORTRAIT)                                     */}
       {/* ========================================================================= */}
       <div className="fixed inset-x-0 bottom-0 z-20 px-3 pb-[max(0.6rem,env(safe-area-inset-bottom))] sm:hidden">
@@ -1956,11 +2490,10 @@ export default function Home() {
                 key={tab.id}
                 type="button"
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex flex-col items-center justify-center min-h-[48px] rounded-xl border px-0.5 py-1 text-[9px] uppercase tracking-wider transition active:scale-95 ${
-                  isActive
+                className={`flex flex-col items-center justify-center min-h-[48px] rounded-xl border px-0.5 py-1 text-[9px] uppercase tracking-wider transition active:scale-95 ${isActive
                     ? "border-primary bg-primary/25 text-primary shadow-[0_0_12px_var(--theme-glow)] font-bold"
                     : "border-white/10 bg-white/5 text-muted"
-                }`}
+                  }`}
               >
                 <span className="text-xs">{tab.icon}</span>
                 <span className="mt-0.5 font-display text-[8px]">{tab.label}</span>
