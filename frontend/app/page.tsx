@@ -1263,7 +1263,7 @@ export default function Home() {
   return (
     <main
       data-theme={theme}
-      className="relative min-h-[100svh] overflow-x-hidden bg-cockpit-grid px-3 pb-[max(5rem,env(safe-area-inset-bottom))] pt-[max(0.6rem,env(safe-area-inset-top))] text-main transition-colors duration-300 sm:px-6 sm:pb-6 font-body"
+      className="relative min-h-[100svh] overflow-x-hidden bg-cockpit-grid px-3 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(0.6rem,env(safe-area-inset-top))] text-main transition-colors duration-300 sm:px-6 sm:pb-6 font-body"
     >
       <div className="relative mx-auto flex w-full max-w-7xl flex-col gap-3">
         {/* ========================================================================= */}
@@ -1287,7 +1287,7 @@ export default function Home() {
             </div>
 
             {/* Orta Tell-Tale Göstergeleri (Uyarı Lambaları) */}
-            <div className="flex items-center gap-1.5 sm:gap-2">
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
               {/* BLE Bağlantı Işığı */}
               <div
                 className={`flex items-center gap-1 rounded-full border px-2 py-1 text-[9px] font-semibold tracking-wider ${data?.connected
@@ -2636,31 +2636,6 @@ export default function Home() {
           </motion.div>
         </div>
       ) : null}
-
-      {/* ========================================================================= */}
-      {/* MOBİL ALT SABİT NAVİGASYON (PORTRAIT)                                     */}
-      {/* ========================================================================= */}
-      <div className="fixed inset-x-0 bottom-0 z-20 px-3 pb-[max(0.6rem,env(safe-area-inset-bottom))] sm:hidden">
-        <div className="mx-auto grid max-w-md grid-cols-5 gap-1 rounded-2xl border border-card-border bg-black/90 p-1.5 shadow-2xl backdrop-blur-xl">
-          {dashboardTabs.map((tab) => {
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setActiveTab(tab.id)}
-                className={`flex flex-col items-center justify-center min-h-[48px] rounded-xl border px-0.5 py-1 text-[9px] uppercase tracking-wider transition active:scale-95 ${isActive
-                    ? "border-primary bg-primary/25 text-primary shadow-[0_0_12px_var(--theme-glow)] font-bold"
-                    : "border-white/10 bg-white/5 text-muted"
-                  }`}
-              >
-                <span className="text-xs">{tab.icon}</span>
-                <span className="mt-0.5 font-display text-[8px]">{tab.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
     </main>
   );
 }
