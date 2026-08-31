@@ -1,4 +1,10 @@
-import { BleClient, type BleDevice, numbersToDataView, dataViewToNumbers } from "@capacitor-community/bluetooth-le";
+import {
+  BleClient,
+  type BleDevice,
+  ConnectionPriority,
+  numbersToDataView,
+  dataViewToNumbers,
+} from "@capacitor-community/bluetooth-le";
 
 export type TelemetryState = {
   connected: boolean;
@@ -27,6 +33,9 @@ const DEFAULT_SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb";
 const DEFAULT_NOTIFY_CHAR = "0000fff1-0000-1000-8000-00805f9b34fb";
 const DEFAULT_WRITE_CHAR = "0000fff2-0000-1000-8000-00805f9b34fb";
 
+const STORAGE_KEY_LAST_DEVICE_ID = "auradrive_last_ble_device_id";
+const STORAGE_KEY_LAST_DEVICE_NAME = "auradrive_last_ble_device_name";
+
 // 2006 Toyota Corolla 1.4 D-4D (1ND-TV) Parametreleri
 const DIESEL_DENSITY_G_PER_L = 840.0;
 const MIN_DIESEL_AFR = 17.5;
@@ -46,6 +55,10 @@ export class MobileObdBleService {
   private serviceUuid = DEFAULT_SERVICE_UUID;
   private notifyUuid = DEFAULT_NOTIFY_CHAR;
   private writeUuid = DEFAULT_WRITE_CHAR;
+  private canWriteWithoutResponse = false;
+  private consecutiveErrors = 0;
+  private lastSuccessTimestamp = 0;
+  private directConnectAttempts = 0;
 
   private state: TelemetryState = {
     connected: false,
@@ -69,7 +82,26 @@ export class MobileObdBleService {
 
   private listeners: Array<(state: TelemetryState) => void> = [];
 
-  private constructor() {}
+  private constructor() {
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          const now = Date.now();
+          if (
+            this.isRunning &&
+            (!this.state.connected || (this.lastSuccessTimestamp > 0 && now - this.lastSuccessTimestamp > 4000))
+          ) {
+            console.log("[MobileObdBleService] Uygulama ön plana geldi, veri akışı kontrol ediliyor...");
+            if (this.connectedDeviceId) {
+              BleClient.disconnect(this.connectedDeviceId).catch(() => {});
+            }
+            this.state.connected = false;
+            this.notifyListeners();
+          }
+        }
+      });
+    }
+  }
 
   public static getInstance(): MobileObdBleService {
     if (!MobileObdBleService.instance) {
@@ -113,10 +145,38 @@ export class MobileObdBleService {
     this.notifyListeners();
   }
 
+  private getSavedDeviceId(): string | null {
+    if (typeof localStorage === "undefined") return null;
+    try {
+      return localStorage.getItem(STORAGE_KEY_LAST_DEVICE_ID);
+    } catch {
+      return null;
+    }
+  }
+
+  private getSavedDeviceName(): string | null {
+    if (typeof localStorage === "undefined") return null;
+    try {
+      return localStorage.getItem(STORAGE_KEY_LAST_DEVICE_NAME);
+    } catch {
+      return null;
+    }
+  }
+
+  private saveDevice(deviceId: string, name?: string) {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem(STORAGE_KEY_LAST_DEVICE_ID, deviceId);
+      if (name) localStorage.setItem(STORAGE_KEY_LAST_DEVICE_NAME, name);
+    } catch {
+      // Ignore
+    }
+  }
+
   private async initBle(): Promise<boolean> {
     if (this.isInitialized) return true;
     try {
-      await BleClient.initialize();
+      await BleClient.initialize({ androidNeverForLocation: true });
       this.isInitialized = true;
       return true;
     } catch (err: any) {
@@ -127,13 +187,13 @@ export class MobileObdBleService {
   }
 
   private async runLoop() {
-    let reconnectDelay = 1500;
+    let reconnectDelay = 1200;
 
     while (this.isRunning) {
       try {
         const ok = await this.initBle();
         if (!ok) {
-          await new Promise((r) => setTimeout(r, 3000));
+          await new Promise((r) => setTimeout(r, 2500));
           continue;
         }
 
@@ -141,13 +201,29 @@ export class MobileObdBleService {
         this.state.last_error = null;
         this.notifyListeners();
 
-        const device = await this.scanForObd();
+        let device: BleDevice | null = null;
+        const savedId = this.getSavedDeviceId();
+
+        // 1. Önce kayıtlı cihaza doğrudan bağlanmayı dene (BLE Scan yapmadan -> Araç multimedya/müzik akışını bozmaz)
+        if (savedId && this.directConnectAttempts < 2) {
+          device = {
+            deviceId: savedId,
+            name: this.getSavedDeviceName() || "OBD-II (Kayıtlı)",
+          };
+          this.directConnectAttempts++;
+        } else {
+          // 2. Kayıtlı cihaz yoksa veya doğrudan bağlantı başarısız olduysa tarama yap
+          device = await this.scanForObd();
+          this.directConnectAttempts = 0;
+        }
+
         if (!device) {
           throw new Error("OBD-II Bluetooth adaptörü bulunamadı");
         }
 
         await this.connectAndStream(device);
-        reconnectDelay = 1500;
+        this.directConnectAttempts = 0;
+        reconnectDelay = 1200;
       } catch (err: any) {
         this.state.connected = false;
         this.state.connecting = false;
@@ -156,7 +232,7 @@ export class MobileObdBleService {
 
         if (!this.isRunning) break;
         await new Promise((r) => setTimeout(r, reconnectDelay));
-        reconnectDelay = Math.min(reconnectDelay * 1.5, 4000);
+        reconnectDelay = Math.min(reconnectDelay * 1.4, 4000);
       }
     }
   }
@@ -173,7 +249,7 @@ export class MobileObdBleService {
         }
       });
 
-      await new Promise((r) => setTimeout(r, 3500));
+      await new Promise((r) => setTimeout(r, 3000));
       await BleClient.stopLEScan().catch(() => {});
     } catch {
       // Scan error
@@ -184,19 +260,40 @@ export class MobileObdBleService {
 
   private async connectAndStream(device: BleDevice) {
     this.connectedDeviceId = device.deviceId;
-    await BleClient.connect(device.deviceId, (deviceId) => {
-      if (deviceId === this.connectedDeviceId) {
-        this.state.connected = false;
-        this.state.connecting = false;
-        this.notifyListeners();
-      }
-    });
+    this.consecutiveErrors = 0;
+    this.lastSuccessTimestamp = 0;
+
+    await BleClient.connect(
+      device.deviceId,
+      (deviceId) => {
+        if (deviceId === this.connectedDeviceId) {
+          console.warn("[MobileObdBleService] BLE bağlantısı koptu (onDisconnect)");
+          this.state.connected = false;
+          this.state.connecting = false;
+          this.notifyListeners();
+        }
+      },
+      { timeout: 7000 },
+    );
+
+    // Başarılı bağlanan cihazı kaydet
+    this.saveDevice(device.deviceId, device.name);
+
+    // Android Bluetooth A2DP Müzik & BLE Birlikte Çalışma Optimizasyonu
+    try {
+      await BleClient.requestConnectionPriority(
+        device.deviceId,
+        ConnectionPriority.CONNECTION_PRIORITY_BALANCED,
+      );
+    } catch {
+      // Platform desteklemiyorsa geç
+    }
 
     // Servis ve Karakteristikleri Keşfet
     const services = await BleClient.getServices(device.deviceId);
     this.detectUuids(services);
 
-    // Bildirimleri Dinlemeye Başla (Sıfır Gecikmeli Instant Event Resolver)
+    // Bildirimleri Dinlemeye Başla
     this.notifyBuffer = "";
     await BleClient.startNotifications(
       device.deviceId,
@@ -223,87 +320,143 @@ export class MobileObdBleService {
       },
     );
 
-    // ELM327 Adaptörü Optimize Parametrelerle Başlat
+    // ELM327 Adaptörü Bluetooth Müzik / A2DP Eşzamanlılığına Dayanıklı Parametrelerle Başlat
     await this.initializeElm327(device.deviceId);
 
     this.state.connected = true;
     this.state.connecting = false;
     this.state.last_error = null;
+    this.lastSuccessTimestamp = Date.now();
     this.notifyListeners();
 
-    // Süper Akıcı Yüksek Frekanslı Telemetri Döngüsü (~20 Hz Interleaved)
+    // Süper Akıcı, Zaman Bölüşümlü Telemetri Döngüsü (~10-15 Hz)
     let subTick = 0;
     while (this.isRunning && this.state.connected) {
       await this.streamFastStep(device.deviceId, subTick);
       subTick = (subTick + 1) % 6;
-      // Sıfır bekleme (paketler geldikçe anında bir sonraki sorgulanır)
+
+      // Bluetooth bandını rahatlatma payı (A2DP müzik akışının tıkanmasını engeller)
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Sağlık ve Kilitlenme Kontrolü (Watchdog)
+      const now = Date.now();
+      if (
+        this.consecutiveErrors >= 7 ||
+        (this.lastSuccessTimestamp > 0 && now - this.lastSuccessTimestamp > 4500)
+      ) {
+        console.warn("[MobileObdBleService] Veri akışı kesildi veya Bluetooth yanıt vermiyor, yeniden bağlanılıyor...");
+        this.state.connected = false;
+        this.state.connecting = false;
+        this.notifyListeners();
+        try {
+          await BleClient.disconnect(device.deviceId);
+        } catch {
+          // Ignore
+        }
+        break;
+      }
     }
   }
 
   private detectUuids(services: any[]) {
     for (const s of services) {
       const sUuid = s.uuid.toLowerCase();
-      if (sUuid.includes("fff0") || sUuid.includes("ffe0") || sUuid.includes("18f0") || sUuid.includes("ae00")) {
+      if (
+        sUuid.includes("fff0") ||
+        sUuid.includes("ffe0") ||
+        sUuid.includes("18f0") ||
+        sUuid.includes("ae00") ||
+        sUuid.includes("e7810a70")
+      ) {
         this.serviceUuid = s.uuid;
         for (const c of s.characteristics) {
           const cUuid = c.uuid.toLowerCase();
-          if (cUuid.includes("fff1") || cUuid.includes("ffe1") || cUuid.includes("ae02")) {
+          if (
+            cUuid.includes("fff1") ||
+            cUuid.includes("ffe1") ||
+            cUuid.includes("ae02") ||
+            cUuid.includes("e7810a71")
+          ) {
             this.notifyUuid = c.uuid;
           }
-          if (cUuid.includes("fff2") || cUuid.includes("ffe1") || cUuid.includes("ae01")) {
+          if (
+            cUuid.includes("fff2") ||
+            cUuid.includes("ffe1") ||
+            cUuid.includes("ae01") ||
+            cUuid.includes("e7810a72")
+          ) {
             this.writeUuid = c.uuid;
+            this.canWriteWithoutResponse = !!c.properties?.writeWithoutResponse;
           }
         }
       }
     }
   }
 
-  private sendCommand(deviceId: string, command: string, timeoutMs = 450): Promise<string> {
+  private sendCommand(deviceId: string, command: string, timeoutMs = 400): Promise<string> {
     return new Promise(async (resolve) => {
       this.notifyBuffer = "";
-      this.responseResolver = resolve;
+      let isDone = false;
 
-      this.responseTimeoutTimer = setTimeout(() => {
-        this.responseResolver = null;
-        resolve(this.notifyBuffer);
-      }, timeoutMs);
-
-      try {
-        const payload = Array.from(`${command}\r`).map((c) => c.charCodeAt(0));
-        await BleClient.write(deviceId, this.serviceUuid, this.writeUuid, numbersToDataView(payload));
-      } catch {
+      const finish = (resultText: string) => {
+        if (isDone) return;
+        isDone = true;
         if (this.responseTimeoutTimer) {
           clearTimeout(this.responseTimeoutTimer);
           this.responseTimeoutTimer = null;
         }
         this.responseResolver = null;
-        resolve("");
+        resolve(resultText);
+      };
+
+      this.responseResolver = finish;
+
+      this.responseTimeoutTimer = setTimeout(() => {
+        finish(this.notifyBuffer);
+      }, timeoutMs);
+
+      try {
+        const payload = Array.from(`${command}\r`).map((c) => c.charCodeAt(0));
+        const data = numbersToDataView(payload);
+        if (this.canWriteWithoutResponse) {
+          await BleClient.writeWithoutResponse(deviceId, this.serviceUuid, this.writeUuid, data);
+        } else {
+          await BleClient.write(deviceId, this.serviceUuid, this.writeUuid, data);
+        }
+      } catch {
+        finish("");
       }
     });
   }
 
   private async initializeElm327(deviceId: string) {
-    // ATAT2: Agresif adaptif zamanlama (ECU cevap verir vermez ELM327 hemen doner)
-    // ATS0: Bosluklari kapat (BLE paket boyutu %40 kuculur)
-    const initCommands = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATAT2", "ATAL", "ATSP5"];
+    // ATZ: Tam sıfırlama
+    // ATE0: Eko kapat
+    // ATL0: Linefeed kapat
+    // ATS0: Boşlukları kapat (paket boyutu küçülür, BLE aktarımı hızlanır)
+    // ATH0: Başlıkları kapat
+    // ATAT1: Standart adaptif zamanlama (ATAT2 gibi aşırı agresif değildir; müzik akışında geciken paketleri yakalar)
+    // ATST64: Güvenli zaman aşımı (~400ms)
+    // ATAL: Uzun mesajlara izin ver
+    // ATSP5: Toyota Corolla 1.4 D-4D için ISO 14230-4 KWP Fast Init
+    const initCommands = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATAT1", "ATST64", "ATAL", "ATSP5"];
     for (const cmd of initCommands) {
-      await this.sendCommand(deviceId, cmd, 600);
+      await this.sendCommand(deviceId, cmd, 700);
       if (cmd === "ATZ") {
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 800));
       } else {
-        await new Promise((r) => setTimeout(r, 20));
+        await new Promise((r) => setTimeout(r, 25));
       }
     }
   }
 
   /**
-   * Süper Akıcı Çoklu Öncelikli Sorgulama (Interleaved Priority Multiplexing)
-   * Her adımda RPM ve Hız anında ekrana yansıtılır!
+   * Süper Akıcı & Çakışmasız Çoklu Öncelikli Sorgulama (Paced Priority Multiplexing)
    */
   private async streamFastStep(deviceId: string, tick: number) {
     const now = Date.now();
 
-    // 1. Yüksek Öncelik: Her döngüde RPM sorgulanır (Anlık Gaz Tepkisi)
+    // 1. Yüksek Öncelik: RPM
     const rpm = await this.queryPid(deviceId, "010C", "0C", this.parseRpm);
     if (rpm !== null) {
       this.state.rpm = rpm;
@@ -311,7 +464,10 @@ export class MobileObdBleService {
       this.notifyListeners();
     }
 
-    // 2. Yüksek Öncelik: Hız sorgulanır
+    // Bluetooth paket kuyruğunu rahatlatmak için mikro aralık
+    await new Promise((r) => setTimeout(r, 15));
+
+    // 2. Yüksek Öncelik: Hız
     const speed = await this.queryPid(deviceId, "010D", "0D", this.parseSpeed);
     if (speed !== null) {
       this.state.speed_kmh = speed;
@@ -319,7 +475,9 @@ export class MobileObdBleService {
       this.notifyListeners();
     }
 
-    // 3. Dönen İkincil PID'ler (Her alt adımda biri sorgulanır)
+    await new Promise((r) => setTimeout(r, 15));
+
+    // 3. Dönen İkincil PID'ler
     switch (tick) {
       case 0:
       case 3: {
@@ -336,6 +494,7 @@ export class MobileObdBleService {
       case 2: {
         const load = await this.queryPid(deviceId, "0104", "04", this.parseLoad);
         if (load !== null) this.state.load_percent = load;
+        await new Promise((r) => setTimeout(r, 12));
         const throttle = await this.queryPid(deviceId, "0111", "11", this.parseThrottle);
         if (throttle !== null) this.state.throttle_percent = throttle;
         break;
@@ -345,9 +504,11 @@ export class MobileObdBleService {
           const coolant = await this.queryPid(deviceId, "0105", "05", this.parseCoolant);
           if (coolant !== null) this.state.coolant_temp_c = coolant;
 
+          await new Promise((r) => setTimeout(r, 12));
           const intake = await this.queryPid(deviceId, "010F", "0F", this.parseIntakeTemp);
           if (intake !== null) this.state.intake_temp_c = intake;
 
+          await new Promise((r) => setTimeout(r, 12));
           const dist = await this.queryPid(deviceId, "0121", "21", this.parseDistance);
           if (dist !== null) this.state.distance_mil_on = dist;
 
@@ -386,7 +547,12 @@ export class MobileObdBleService {
   ): Promise<number | null> {
     const raw = await this.sendCommand(deviceId, command);
     const payload = this.extractPayload(raw, pidHex);
-    if (!payload) return null;
+    if (!payload) {
+      this.consecutiveErrors++;
+      return null;
+    }
+    this.consecutiveErrors = 0;
+    this.lastSuccessTimestamp = Date.now();
     return parser(payload);
   }
 
@@ -456,7 +622,7 @@ export class MobileObdBleService {
 
   private parseDistance(data: number[]): number | null {
     if (data.length < 2) return null;
-    return (data[0] * 256) + data[1];
+    return ((data[0] * 256) + data[1]);
   }
 
   private calculateTurboBoost(mapKpa: number | null, rpm: number | null): number | null {
