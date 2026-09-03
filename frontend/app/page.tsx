@@ -683,6 +683,12 @@ export default function Home() {
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [routePoints, setRoutePoints] = useState<GpsPoint[]>([]);
   const lastRecordedGpsRef = useRef<GpsPoint | null>(null);
+  const currentSpeedRef = useRef<number>(0);
+
+  // Anlık hızı ref üzerinden canlı güncelle (watchPosition döngüsünü sürekli yıkıp yeniden başlatmamak için)
+  useEffect(() => {
+    currentSpeedRef.current = data?.speed_kmh ?? 0;
+  }, [data?.speed_kmh]);
 
   // Geçmiş Sürüşleri Yükle
   useEffect(() => {
@@ -696,7 +702,7 @@ export default function Home() {
     }
   }, []);
 
-  // Canlı GPS Dinleyicisi
+  // Canlı GPS Dinleyicisi (Tek sefer başlar, gereksiz GPU/Pil harcamaz)
   useEffect(() => {
     if (typeof window === "undefined" || !("geolocation" in navigator)) {
       return;
@@ -709,7 +715,7 @@ export default function Home() {
         const newPoint: GpsPoint = {
           lat: position.coords.latitude,
           lng: position.coords.longitude,
-          speed: position.coords.speed !== null ? position.coords.speed * 3.6 : (data?.speed_kmh ?? 0),
+          speed: position.coords.speed !== null ? position.coords.speed * 3.6 : currentSpeedRef.current,
           altitude: position.coords.altitude,
           timestamp: position.timestamp || Date.now(),
         };
@@ -746,7 +752,7 @@ export default function Home() {
     return () => {
       navigator.geolocation.clearWatch(watchId);
     };
-  }, [data?.speed_kmh]);
+  }, []);
 
   // Demo Modunda Gerçekçi GPS Rotası Üret
   useEffect(() => {
@@ -825,21 +831,22 @@ export default function Home() {
       return;
     }
 
-    const speed = data.speed_kmh ?? 0;
+    const speed = Number.isFinite(data.speed_kmh) ? Math.max(0, data.speed_kmh!) : 0;
     const deltaDistanceKm = (speed * deltaSeconds) / 3600;
 
-    let fuelRateLph = data.fuel_rate_lph;
-    if (fuelRateLph === undefined || fuelRateLph === null) {
+    let rawFuelRate = data.fuel_rate_lph;
+    if (rawFuelRate === undefined || rawFuelRate === null) {
       if (data.fuel_unit === "L/h" && data.fuel_display !== null) {
-        fuelRateLph = data.fuel_display;
+        rawFuelRate = data.fuel_display;
       } else if (data.fuel_unit === "L/100km" && data.fuel_display !== null && speed > 0) {
-        fuelRateLph = (data.fuel_display * speed) / 100;
+        rawFuelRate = (data.fuel_display * speed) / 100;
       } else {
-        fuelRateLph = 0;
+        rawFuelRate = 0;
       }
     }
 
-    const deltaFuelLiters = (fuelRateLph * deltaSeconds) / 3600;
+    const validFuelRate = Number.isFinite(rawFuelRate) ? Math.max(0, rawFuelRate!) : 0;
+    const deltaFuelLiters = (validFuelRate * deltaSeconds) / 3600;
     const deltaDurationMs = deltaSeconds * 1000;
     const deltaMovingMs = speed > 1.5 ? deltaDurationMs : 0;
 

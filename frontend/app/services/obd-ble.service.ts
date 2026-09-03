@@ -784,6 +784,7 @@ export class MobileObdBleService {
   }
 
   private saveDevice(deviceId: string, name?: string) {
+    if (typeof window === "undefined" || !window.localStorage) return;
     try {
       localStorage.setItem(STORAGE_KEY_LAST_DEVICE_ID, deviceId);
       if (name) localStorage.setItem(STORAGE_KEY_LAST_DEVICE_NAME, name);
@@ -791,6 +792,7 @@ export class MobileObdBleService {
   }
 
   public getSavedDeviceId(): string | null {
+    if (typeof window === "undefined" || !window.localStorage) return null;
     try {
       return localStorage.getItem(STORAGE_KEY_LAST_DEVICE_ID);
     } catch {
@@ -799,6 +801,7 @@ export class MobileObdBleService {
   }
 
   public getSavedDeviceName(): string | null {
+    if (typeof window === "undefined" || !window.localStorage) return null;
     try {
       return localStorage.getItem(STORAGE_KEY_LAST_DEVICE_NAME);
     } catch {

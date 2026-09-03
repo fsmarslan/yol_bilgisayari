@@ -150,9 +150,15 @@ public class AuraBleManager {
                     }
                     gatt.discoverServices();
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    Log.w(TAG, "GATT bağlantısı koptu");
+                    Log.w(TAG, "GATT bağlantısı koptu, kaynaklar temizleniyor (gatt.close)...");
                     isConnected = false;
                     isRunning = false;
+                    try {
+                        gatt.close();
+                    } catch (Exception ignored) {}
+                    if (bluetoothGatt == gatt) {
+                        bluetoothGatt = null;
+                    }
                     resetTelemetryState();
                     if (listener != null) listener.onConnectionStateChange(false, "Bağlantı koptu");
                 }
