@@ -9,6 +9,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AuraBackgroundPlugin.class);
+        registerPlugin(AuraNativeBlePlugin.class);
         super.onCreate(savedInstanceState);
 
         try {

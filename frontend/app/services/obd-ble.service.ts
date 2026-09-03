@@ -5,6 +5,7 @@ import {
   numbersToDataView,
   dataViewToNumbers,
 } from "@capacitor-community/bluetooth-le";
+import { registerPlugin, Capacitor } from "@capacitor/core";
 
 export type DtcItem = {
   code: string;
@@ -34,6 +35,21 @@ export type TelemetryState = {
   updated_at: string | null;
 };
 
+// Android Native BLE Köprü Arayüzü (AuraNativeBlePlugin)
+export interface AuraNativeBlePluginInterface {
+  connect(options: { deviceId: string }): Promise<{ success: boolean; connecting: boolean }>;
+  disconnect(): Promise<{ success: boolean }>;
+  isConnected(): Promise<{ connected: boolean }>;
+  sendCustomCommand(options: { command: string; timeout?: number }): Promise<{ response: string }>;
+  startScan(): Promise<{ devices: Array<{ deviceId: string; name: string }> }>;
+  addListener(
+    eventName: string,
+    listenerFunc: (data: any) => void,
+  ): Promise<any>;
+}
+
+const AuraNativeBle = registerPlugin<AuraNativeBlePluginInterface>("AuraNativeBle");
+
 const OBD_NAME_HINTS = ["OBD", "OBDII", "ELM", "VLINK", "VGATE", "CAN"];
 
 // Standart BLE OBD-II Servis & Karakteristik UUID'leri
@@ -48,7 +64,6 @@ const STORAGE_KEY_LAST_DEVICE_NAME = "auradrive_last_ble_device_name";
 const DIESEL_DENSITY_G_PER_L = 840.0;
 const MIN_DIESEL_AFR = 17.5;
 const MAX_DIESEL_AFR = 65.0;
-const CRUISE_DEFAULT_AFR = 32.0;
 
 // Yaygın OBD-II & Toyota Arıza Kodları Sözlüğü
 export const DTC_DATABASE: Record<string, { description: string; system: DtcItem["system"]; severity: DtcItem["severity"] }> = {
@@ -93,16 +108,20 @@ export class MobileObdBleService {
   private notifyBuffer: string = "";
   private responseResolver: ((response: string) => void) | null = null;
   private responseTimeoutTimer: any = null;
-  private ambientPressureKpa = 101.3;
-  private lastSlowPollTime = 0;
   private isRunning = false;
+  private isNativeBridge = false;
+
+  // UUID Tanımları (Fallback TS BLE Motoru İçin)
   private serviceUuid = DEFAULT_SERVICE_UUID;
   private notifyUuid = DEFAULT_NOTIFY_CHAR;
   private writeUuid = DEFAULT_WRITE_CHAR;
   private canWriteWithoutResponse = false;
   private consecutiveErrors = 0;
   private lastSuccessTimestamp = 0;
-  private directConnectAttempts = 0;
+
+  // Dinamik Timeout & Exponential Backoff Haritası
+  private pidTimeoutCounts = new Map<string, number>();
+  private pidBackoffUntil = new Map<string, number>();
 
   private state: TelemetryState = {
     connected: false,
@@ -128,23 +147,57 @@ export class MobileObdBleService {
   private listeners: Array<(state: TelemetryState) => void> = [];
 
   private constructor() {
-    if (typeof document !== "undefined") {
+    this.isNativeBridge =
+      typeof window !== "undefined" &&
+      Capacitor.isNativePlatform() &&
+      Capacitor.getPlatform() === "android";
+
+    // 1. Android Native BLE Event Dinleyicileri
+    if (typeof window !== "undefined") {
+      window.addEventListener("nativeTelemetryUpdate", (e: any) => {
+        if (e && e.detail) {
+          this.handleNativeTelemetry(e.detail);
+        }
+      });
+
+      window.addEventListener("nativeConnectionChange", (e: any) => {
+        if (e && e.detail) {
+          this.handleNativeConnectionChange(e.detail);
+        }
+      });
+
+      // Uygulama ön plana geldiğinde bağlantı kontrolü
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "visible") {
           const now = Date.now();
           if (
             this.isRunning &&
-            (!this.state.connected || (this.lastSuccessTimestamp > 0 && now - this.lastSuccessTimestamp > 4000))
+            (!this.state.connected || (this.lastSuccessTimestamp > 0 && now - this.lastSuccessTimestamp > 5000))
           ) {
-            console.log("[MobileObdBleService] Uygulama ön plana geldi, veri akışı kontrol ediliyor...");
-            if (this.connectedDeviceId) {
+            console.log("[MobileObdBleService] Uygulama ön planda, bağlantı taranıyor...");
+            if (this.isNativeBridge) {
+              void this.start();
+            } else if (this.connectedDeviceId) {
               BleClient.disconnect(this.connectedDeviceId).catch(() => {});
+              this.state.connected = false;
+              this.notifyListeners();
             }
-            this.state.connected = false;
-            this.notifyListeners();
           }
         }
       });
+    }
+
+    if (this.isNativeBridge) {
+      try {
+        AuraNativeBle.addListener("telemetryUpdate", (data: any) => {
+          this.handleNativeTelemetry(data);
+        });
+        AuraNativeBle.addListener("connectionChange", (data: any) => {
+          this.handleNativeConnectionChange(data);
+        });
+      } catch (err) {
+        console.warn("[MobileObdBleService] Native BLE plugin listener hatası:", err);
+      }
     }
   }
 
@@ -169,204 +222,228 @@ export class MobileObdBleService {
     }
   }
 
+  /**
+   * Android Native Katmanından Gelen 30+ FPS Normalize Edilmiş Telemetriyi İşle
+   */
+  private handleNativeTelemetry(data: any) {
+    if (!data) return;
+
+    this.state = {
+      connected: data.connected ?? true,
+      connecting: false,
+      rpm: typeof data.rpm === "number" ? data.rpm : this.state.rpm,
+      speed_kmh: typeof data.speed_kmh === "number" ? data.speed_kmh : this.state.speed_kmh,
+      map_kpa: typeof data.map_kpa === "number" ? data.map_kpa : this.state.map_kpa,
+      throttle_percent: typeof data.throttle_percent === "number" ? data.throttle_percent : this.state.throttle_percent,
+      maf_gps: typeof data.maf_gps === "number" ? data.maf_gps : this.state.maf_gps,
+      coolant_temp_c: typeof data.coolant_temp_c === "number" ? data.coolant_temp_c : this.state.coolant_temp_c,
+      intake_temp_c: typeof data.intake_temp_c === "number" ? data.intake_temp_c : this.state.intake_temp_c,
+      load_percent: typeof data.load_percent === "number" ? data.load_percent : this.state.load_percent,
+      distance_mil_on: typeof data.distance_mil_on === "number" ? data.distance_mil_on : this.state.distance_mil_on,
+      battery_voltage: typeof data.battery_voltage === "number" ? data.battery_voltage : this.state.battery_voltage,
+      turbo_boost_bar: typeof data.turbo_boost_bar === "number" ? data.turbo_boost_bar : this.state.turbo_boost_bar,
+      fuel_display: typeof data.fuel_display === "number" ? data.fuel_display : this.state.fuel_display,
+      fuel_unit: data.fuel_unit || this.state.fuel_unit,
+      fuel_rate_lph: typeof data.fuel_rate_lph === "number" ? data.fuel_rate_lph : this.state.fuel_rate_lph,
+      last_error: null,
+      updated_at: String(data.updated_at || Date.now()),
+    };
+
+    this.lastSuccessTimestamp = Date.now();
+    this.notifyListeners();
+  }
+
+  private handleNativeConnectionChange(data: any) {
+    this.state.connected = !!data.connected;
+    this.state.connecting = false;
+    if (data.message) {
+      this.state.last_error = data.message;
+    }
+    this.notifyListeners();
+  }
+
   public async start(): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
-    this.runLoop();
+
+    if (this.isNativeBridge) {
+      void this.runNativeBleLoop();
+    } else {
+      void this.runFallbackTsLoop();
+    }
   }
 
   public async stop(): Promise<void> {
     this.isRunning = false;
-    if (this.connectedDeviceId) {
+    if (this.isNativeBridge) {
+      try {
+        await AuraNativeBle.disconnect();
+      } catch {}
+    } else if (this.connectedDeviceId) {
       try {
         await BleClient.disconnect(this.connectedDeviceId);
-      } catch {
-        // Ignore
-      }
-      this.connectedDeviceId = null;
+      } catch {}
     }
     this.state.connected = false;
     this.state.connecting = false;
     this.notifyListeners();
   }
 
-  private getSavedDeviceId(): string | null {
-    if (typeof localStorage === "undefined") return null;
-    try {
-      return localStorage.getItem(STORAGE_KEY_LAST_DEVICE_ID);
-    } catch {
-      return null;
-    }
-  }
+  // =========================================================================
+  // 1. ANDROID NATIVE BLE ÇALIŞTIRMA MOTORU
+  // =========================================================================
+  private async runNativeBleLoop(): Promise<void> {
+    const savedId = this.getSavedDeviceId();
 
-  private getSavedDeviceName(): string | null {
-    if (typeof localStorage === "undefined") return null;
-    try {
-      return localStorage.getItem(STORAGE_KEY_LAST_DEVICE_NAME);
-    } catch {
-      return null;
-    }
-  }
-
-  private saveDevice(deviceId: string, name?: string) {
-    if (typeof localStorage === "undefined") return;
-    try {
-      localStorage.setItem(STORAGE_KEY_LAST_DEVICE_ID, deviceId);
-      if (name) localStorage.setItem(STORAGE_KEY_LAST_DEVICE_NAME, name);
-    } catch {
-      // Ignore
-    }
-  }
-
-  private async initBle(): Promise<boolean> {
-    if (this.isInitialized) return true;
-    try {
-      await BleClient.initialize({ androidNeverForLocation: true });
-      this.isInitialized = true;
-      return true;
-    } catch (err: any) {
-      this.state.last_error = `Bluetooth başlatılamadı: ${err?.message || err}`;
+    if (savedId) {
+      console.log("[MobileObdBleService] Native BLE son cihaza bağlanıyor:", savedId);
+      this.state.connecting = true;
       this.notifyListeners();
-      return false;
-    }
-  }
-
-  private async runLoop() {
-    let reconnectDelay = 1200;
-
-    while (this.isRunning) {
       try {
-        const ok = await this.initBle();
-        if (!ok) {
-          await new Promise((r) => setTimeout(r, 2500));
-          continue;
-        }
-
-        this.state.connecting = true;
-        this.state.last_error = null;
-        this.notifyListeners();
-
-        let device: BleDevice | null = null;
-        const savedId = this.getSavedDeviceId();
-
-        // 1. Önce kayıtlı cihaza doğrudan bağlanmayı dene (BLE Scan yapmadan -> Araç multimedya/müzik akışını bozmaz)
-        if (savedId && this.directConnectAttempts < 2) {
-          device = {
-            deviceId: savedId,
-            name: this.getSavedDeviceName() || "OBD-II (Kayıtlı)",
-          };
-          this.directConnectAttempts++;
-        } else {
-          // 2. Kayıtlı cihaz yoksa veya doğrudan bağlantı başarısız olduysa tarama yap
-          device = await this.scanForObd();
-          this.directConnectAttempts = 0;
-        }
-
-        if (!device) {
-          throw new Error("OBD-II Bluetooth adaptörü bulunamadı");
-        }
-
-        await this.connectAndStream(device);
-        this.directConnectAttempts = 0;
-        reconnectDelay = 1200;
-      } catch (err: any) {
-        this.state.connected = false;
-        this.state.connecting = false;
-        this.state.last_error = err?.message || String(err);
-        this.notifyListeners();
-
-        if (!this.isRunning) break;
-        await new Promise((r) => setTimeout(r, reconnectDelay));
-        reconnectDelay = Math.min(reconnectDelay * 1.4, 4000);
+        await AuraNativeBle.connect({ deviceId: savedId });
+        return;
+      } catch (err) {
+        console.warn("[MobileObdBleService] Native BLE son cihaz bağlantı hatası:", err);
       }
     }
-  }
 
-  private async scanForObd(): Promise<BleDevice | null> {
-    let targetDevice: BleDevice | null = null;
+    // Cihaz yoksa veya bağlantı başarısızsa BLE taraması yap
+    this.state.connecting = true;
+    this.notifyListeners();
 
     try {
-      await BleClient.requestLEScan({}, (result) => {
-        const name = (result.device.name || result.localName || "").toUpperCase();
-        if (OBD_NAME_HINTS.some((hint) => name.includes(hint))) {
-          targetDevice = result.device;
-          BleClient.stopLEScan().catch(() => {});
-        }
-      });
+      const scanRes = await AuraNativeBle.startScan();
+      const devices = scanRes.devices || [];
+      const obd = devices.find((d) =>
+        OBD_NAME_HINTS.some((h) => d.name?.toUpperCase().includes(h)),
+      ) || devices[0];
 
-      await new Promise((r) => setTimeout(r, 3000));
-      await BleClient.stopLEScan().catch(() => {});
-    } catch {
-      // Scan error
+      if (obd && obd.deviceId) {
+        this.saveDevice(obd.deviceId, obd.name);
+        await AuraNativeBle.connect({ deviceId: obd.deviceId });
+      } else {
+        this.state.connecting = false;
+        this.state.last_error = "OBD-II BLE cihazı bulunamadı. Lütfen kontağı açın.";
+        this.notifyListeners();
+      }
+    } catch (err: any) {
+      this.state.connecting = false;
+      this.state.last_error = "BLE tarama hatası: " + (err?.message || err);
+      this.notifyListeners();
     }
-
-    return targetDevice;
   }
 
-  private async connectAndStream(device: BleDevice) {
-    this.connectedDeviceId = device.deviceId;
-    this.consecutiveErrors = 0;
-    this.lastSuccessTimestamp = 0;
+  // =========================================================================
+  // 2. TYPESCRIPT FALLBACK ENGINE (PRIORITY QUEUE & DİNAMİK BACKOFF)
+  // Web, masaüstü veya native eklenti bulunmadığında devreye girer
+  // =========================================================================
+  private async runFallbackTsLoop(): Promise<void> {
+    if (!this.isInitialized) {
+      try {
+        await BleClient.initialize();
+        this.isInitialized = true;
+      } catch (e: any) {
+        this.state.last_error = "BLE başlatılamadı: " + (e?.message || e);
+        this.state.connecting = false;
+        this.notifyListeners();
+        return;
+      }
+    }
 
-    await BleClient.connect(
-      device.deviceId,
-      (deviceId) => {
-        if (deviceId === this.connectedDeviceId) {
-          console.warn("[MobileObdBleService] BLE bağlantısı koptu (onDisconnect)");
-          this.state.connected = false;
+    while (this.isRunning) {
+      if (!this.state.connected) {
+        this.state.connecting = true;
+        this.notifyListeners();
+
+        try {
+          const device = await this.findOrSelectDevice();
+          if (!device) {
+            await new Promise((r) => setTimeout(r, 2500));
+            continue;
+          }
+          await this.connectAndStreamTsFallback(device);
+        } catch (err: any) {
           this.state.connecting = false;
+          this.state.last_error = err?.message || "Bağlantı hatası";
           this.notifyListeners();
+          await new Promise((r) => setTimeout(r, 2000));
         }
-      },
-      { timeout: 7000 },
-    );
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
 
-    // Başarılı bağlanan cihazı kaydet
-    this.saveDevice(device.deviceId, device.name);
-
-    // Android Bluetooth A2DP Müzik & BLE Birlikte Çalışma Optimizasyonu
-    try {
-      await BleClient.requestConnectionPriority(
-        device.deviceId,
-        ConnectionPriority.CONNECTION_PRIORITY_BALANCED,
-      );
-    } catch {
-      // Platform desteklemiyorsa geç
+  private async findOrSelectDevice(): Promise<BleDevice | null> {
+    const savedId = this.getSavedDeviceId();
+    if (savedId) {
+      return { deviceId: savedId, name: this.getSavedDeviceName() || "OBD-II Adaptör" };
     }
 
-    // Servis ve Karakteristikleri Keşfet
+    return new Promise(async (resolve) => {
+      let found: BleDevice | null = null;
+      try {
+        await BleClient.requestLEScan({}, (result) => {
+          const name = result.localName || result.device.name || "";
+          const isMatch = OBD_NAME_HINTS.some((hint) => name.toUpperCase().includes(hint));
+          if (isMatch && !found) {
+            found = result.device;
+            BleClient.stopLEScan().catch(() => {});
+            resolve(result.device);
+          }
+        });
+
+        setTimeout(async () => {
+          try {
+            await BleClient.stopLEScan();
+          } catch {}
+          resolve(found);
+        }, 3500);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  private async connectAndStreamTsFallback(device: BleDevice) {
+    this.connectedDeviceId = device.deviceId;
+    await BleClient.connect(device.deviceId, (id) => {
+      if (id === this.connectedDeviceId) {
+        this.state.connected = false;
+        this.state.connecting = false;
+        this.notifyListeners();
+      }
+    }, { timeout: 6000 });
+
+    this.saveDevice(device.deviceId, device.name);
+    try {
+      await BleClient.requestConnectionPriority(device.deviceId, ConnectionPriority.CONNECTION_PRIORITY_BALANCED);
+    } catch {}
+
     const services = await BleClient.getServices(device.deviceId);
     this.detectUuids(services);
 
-    // Bildirimleri Dinlemeye Başla
     this.notifyBuffer = "";
-    await BleClient.startNotifications(
-      device.deviceId,
-      this.serviceUuid,
-      this.notifyUuid,
-      (value) => {
-        const bytes = dataViewToNumbers(value);
-        const text = String.fromCharCode(...bytes);
-        this.notifyBuffer += text;
+    await BleClient.startNotifications(device.deviceId, this.serviceUuid, this.notifyUuid, (value) => {
+      const bytes = dataViewToNumbers(value);
+      const text = String.fromCharCode(...bytes);
+      this.notifyBuffer += text;
 
-        if (this.notifyBuffer.includes(">")) {
-          const finished = this.notifyBuffer;
-          this.notifyBuffer = "";
-          if (this.responseResolver) {
-            if (this.responseTimeoutTimer) {
-              clearTimeout(this.responseTimeoutTimer);
-              this.responseTimeoutTimer = null;
-            }
-            const res = this.responseResolver;
-            this.responseResolver = null;
-            res(finished);
+      if (this.notifyBuffer.includes(">")) {
+        const finished = this.notifyBuffer;
+        this.notifyBuffer = "";
+        if (this.responseResolver) {
+          if (this.responseTimeoutTimer) {
+            clearTimeout(this.responseTimeoutTimer);
+            this.responseTimeoutTimer = null;
           }
+          const res = this.responseResolver;
+          this.responseResolver = null;
+          res(finished);
         }
-      },
-    );
+      }
+    });
 
-    // ELM327 Adaptörü Bluetooth Müzik / A2DP Eşzamanlılığına Dayanıklı Parametrelerle Başlat
-    await this.initializeElm327(device.deviceId);
+    await this.initializeElm327Ts(device.deviceId);
 
     this.state.connected = true;
     this.state.connecting = false;
@@ -374,30 +451,53 @@ export class MobileObdBleService {
     this.lastSuccessTimestamp = Date.now();
     this.notifyListeners();
 
-    // Süper Akıcı, Zaman Bölüşümlü Telemetri Döngüsü (~10-15 Hz)
-    let subTick = 0;
+    // Priority Queue & Dinamik Timeout TS Döngüsü
+    let slowCycle = 0;
+    let lastSlowPoll = 0;
+
     while (this.isRunning && this.state.connected) {
-      await this.streamFastStep(device.deviceId, subTick);
-      subTick = (subTick + 1) % 6;
+      // 1. FAST LOOP (Yüksek Öncelik - Her Döngüde Kesintisiz 25-30+ FPS)
+      await this.pollPidWithBackoff(device.deviceId, "010C", "0C", this.parseRpm, 130);
+      await this.pollPidWithBackoff(device.deviceId, "010D", "0D", this.parseSpeed, 130);
+      await this.pollPidWithBackoff(device.deviceId, "010B", "0B", this.parseMap, 130);
+      await this.pollPidWithBackoff(device.deviceId, "0111", "11", this.parseThrottle, 130);
+      await this.pollPidWithBackoff(device.deviceId, "0110", "10", this.parseMaf, 130);
 
-      // Bluetooth bandını rahatlatma payı (A2DP müzik akışının ve navigasyonun tıkanmasını engeller)
-      await new Promise((r) => setTimeout(r, 24));
-
-      // Sağlık ve Kilitlenme Kontrolü (Watchdog)
+      // 2. SLOW INTERLEAVED LOOP (Her 1.5 sn'de 1 yavaş PID, toplam tur ~7 sn)
       const now = Date.now();
-      if (
-        this.consecutiveErrors >= 7 ||
-        (this.lastSuccessTimestamp > 0 && now - this.lastSuccessTimestamp > 4500)
-      ) {
-        console.warn("[MobileObdBleService] Veri akışı kesildi veya Bluetooth yanıt vermiyor, yeniden bağlanılıyor...");
-        this.state.connected = false;
-        this.state.connecting = false;
-        this.notifyListeners();
-        try {
-          await BleClient.disconnect(device.deviceId);
-        } catch {
-          // Ignore
+      if (now - lastSlowPoll >= 1500) {
+        switch (slowCycle % 5) {
+          case 0:
+            await this.pollPidWithBackoff(device.deviceId, "0105", "05", this.parseCoolant, 140);
+            break;
+          case 1:
+            await this.pollPidWithBackoff(device.deviceId, "010F", "0F", this.parseIntakeTemp, 140);
+            break;
+          case 2:
+            await this.pollPidWithBackoff(device.deviceId, "0104", "04", this.parseLoad, 140);
+            break;
+          case 3:
+            await this.pollPidWithBackoff(device.deviceId, "0121", "21", this.parseDistance, 150);
+            break;
+          case 4:
+            const volt = await this.queryBatteryVoltage(device.deviceId);
+            if (volt !== null) this.state.battery_voltage = volt;
+            break;
         }
+        slowCycle++;
+        lastSlowPoll = now;
+      }
+
+      this.updateCalculations();
+      this.notifyListeners();
+
+      // Müzik A2DP akışı için mikro aralık (12-16ms)
+      await new Promise((r) => setTimeout(r, 14));
+
+      if (this.consecutiveErrors >= 9 || (this.lastSuccessTimestamp > 0 && now - this.lastSuccessTimestamp > 5000)) {
+        console.warn("[MobileObdBleService] TS veri akışı koptu, yeniden bağlanılıyor...");
+        this.state.connected = false;
+        this.notifyListeners();
         break;
       }
     }
@@ -406,30 +506,14 @@ export class MobileObdBleService {
   private detectUuids(services: any[]) {
     for (const s of services) {
       const sUuid = s.uuid.toLowerCase();
-      if (
-        sUuid.includes("fff0") ||
-        sUuid.includes("ffe0") ||
-        sUuid.includes("18f0") ||
-        sUuid.includes("ae00") ||
-        sUuid.includes("e7810a70")
-      ) {
+      if (sUuid.includes("fff0") || sUuid.includes("ffe0") || sUuid.includes("18f0") || sUuid.includes("ae00") || sUuid.includes("e7810a70")) {
         this.serviceUuid = s.uuid;
         for (const c of s.characteristics) {
           const cUuid = c.uuid.toLowerCase();
-          if (
-            cUuid.includes("fff1") ||
-            cUuid.includes("ffe1") ||
-            cUuid.includes("ae02") ||
-            cUuid.includes("e7810a71")
-          ) {
+          if (cUuid.includes("fff1") || cUuid.includes("ffe1") || cUuid.includes("ae02") || cUuid.includes("e7810a71")) {
             this.notifyUuid = c.uuid;
           }
-          if (
-            cUuid.includes("fff2") ||
-            cUuid.includes("ffe1") ||
-            cUuid.includes("ae01") ||
-            cUuid.includes("e7810a72")
-          ) {
+          if (cUuid.includes("fff2") || cUuid.includes("ffe1") || cUuid.includes("ae01") || cUuid.includes("e7810a72")) {
             this.writeUuid = c.uuid;
             this.canWriteWithoutResponse = !!c.properties?.writeWithoutResponse;
           }
@@ -438,7 +522,15 @@ export class MobileObdBleService {
     }
   }
 
-  private sendCommand(deviceId: string, command: string, timeoutMs = 400): Promise<string> {
+  private async initializeElm327Ts(deviceId: string) {
+    const initCommands = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATAT1", "ATST64", "ATAL", "ATSP5"];
+    for (const cmd of initCommands) {
+      await this.sendCommand(deviceId, cmd, 600);
+      await new Promise((r) => setTimeout(r, cmd === "ATZ" ? 700 : 20));
+    }
+  }
+
+  private sendCommand(deviceId: string, command: string, timeoutMs = 135): Promise<string> {
     return new Promise(async (resolve) => {
       this.notifyBuffer = "";
       let isDone = false;
@@ -455,9 +547,8 @@ export class MobileObdBleService {
       };
 
       this.responseResolver = finish;
-
       this.responseTimeoutTimer = setTimeout(() => {
-        finish(this.notifyBuffer);
+        finish(""); // Dinamik Timeout: Beklemeden DROP et
       }, timeoutMs);
 
       try {
@@ -474,144 +565,59 @@ export class MobileObdBleService {
     });
   }
 
-  private async initializeElm327(deviceId: string) {
-    // ATZ: Tam sıfırlama
-    // ATE0: Eko kapat
-    // ATL0: Linefeed kapat
-    // ATS0: Boşlukları kapat (paket boyutu küçülür, BLE aktarımı hızlanır)
-    // ATH0: Başlıkları kapat
-    // ATAT1: Standart adaptif zamanlama (ATAT2 gibi aşırı agresif değildir; müzik akışında geciken paketleri yakalar)
-    // ATST64: Güvenli zaman aşımı (~400ms)
-    // ATAL: Uzun mesajlara izin ver
-    // ATSP5: Toyota Corolla 1.4 D-4D için ISO 14230-4 KWP Fast Init
-    const initCommands = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATAT1", "ATST64", "ATAL", "ATSP5"];
-    for (const cmd of initCommands) {
-      await this.sendCommand(deviceId, cmd, 700);
-      if (cmd === "ATZ") {
-        await new Promise((r) => setTimeout(r, 800));
-      } else {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-    }
-  }
-
   /**
-   * Süper Akıcı & Çakışmasız Çoklu Öncelikli Sorgulama (Paced Priority Multiplexing)
+   * Dinamik Timeout (120-150ms) ve Exponential Backoff ile PID Sorgulama
    */
-  private async streamFastStep(deviceId: string, tick: number) {
-    const now = Date.now();
-
-    const isForeground = typeof document === "undefined" || document.visibilityState === "visible";
-
-    // 1. Yüksek Öncelik: RPM
-    const rpm = await this.queryPid(deviceId, "010C", "0C", this.parseRpm);
-    if (rpm !== null) {
-      this.state.rpm = rpm;
-      if (isForeground) {
-        this.updateCalculations();
-        this.notifyListeners();
-      }
-    }
-
-    // Bluetooth paket kuyruğunu rahatlatmak için mikro aralık (A2DP müzik tamponuna öncelik)
-    await new Promise((r) => setTimeout(r, 16));
-
-    // 2. Yüksek Öncelik: Hız
-    const speed = await this.queryPid(deviceId, "010D", "0D", this.parseSpeed);
-    if (speed !== null) {
-      this.state.speed_kmh = speed;
-      if (isForeground) {
-        this.updateCalculations();
-        this.notifyListeners();
-      }
-    }
-
-    await new Promise((r) => setTimeout(r, 16));
-
-    // 3. Dönen İkincil PID'ler
-    switch (tick) {
-      case 0:
-      case 3: {
-        const maf = await this.queryPid(deviceId, "0110", "10", this.parseMaf);
-        if (maf !== null) this.state.maf_gps = maf;
-        break;
-      }
-      case 1:
-      case 4: {
-        const map = await this.queryPid(deviceId, "010B", "0B", this.parseMap);
-        if (map !== null) this.state.map_kpa = map;
-        break;
-      }
-      case 2: {
-        const load = await this.queryPid(deviceId, "0104", "04", this.parseLoad);
-        if (load !== null) this.state.load_percent = load;
-        await new Promise((r) => setTimeout(r, 12));
-        const throttle = await this.queryPid(deviceId, "0111", "11", this.parseThrottle);
-        if (throttle !== null) this.state.throttle_percent = throttle;
-        break;
-      }
-      case 5: {
-        if (now - this.lastSlowPollTime >= 4000 || this.state.coolant_temp_c === null) {
-          const coolant = await this.queryPid(deviceId, "0105", "05", this.parseCoolant);
-          if (coolant !== null) this.state.coolant_temp_c = coolant;
-
-          await new Promise((r) => setTimeout(r, 12));
-          const intake = await this.queryPid(deviceId, "010F", "0F", this.parseIntakeTemp);
-          if (intake !== null) this.state.intake_temp_c = intake;
-
-          await new Promise((r) => setTimeout(r, 12));
-          const dist = await this.queryPid(deviceId, "0121", "21", this.parseDistance);
-          if (dist !== null) this.state.distance_mil_on = dist;
-
-          await new Promise((r) => setTimeout(r, 12));
-          const voltage = await this.queryBatteryVoltage(deviceId);
-          if (voltage !== null) this.state.battery_voltage = voltage;
-
-          this.lastSlowPollTime = now;
-        }
-        break;
-      }
-    }
-
-    this.updateCalculations();
-    this.notifyListeners();
-  }
-
-  private updateCalculations() {
-    this.state.turbo_boost_bar = this.calculateTurboBoost(this.state.map_kpa, this.state.rpm);
-
-    const [fuelDisplay, fuelUnit, fuelRateLph] = this.calculateDieselFuel(
-      this.state.maf_gps,
-      this.state.speed_kmh,
-      this.state.load_percent,
-      this.state.rpm,
-      this.state.throttle_percent,
-    );
-
-    this.state.fuel_display = fuelDisplay;
-    this.state.fuel_unit = fuelUnit;
-    this.state.fuel_rate_lph = fuelRateLph;
-    this.state.updated_at = new Date().toISOString();
-  }
-
-  private async queryPid(
+  private async pollPidWithBackoff(
     deviceId: string,
     command: string,
     pidHex: string,
     parser: (bytes: number[]) => number | null,
-  ): Promise<number | null> {
-    const raw = await this.sendCommand(deviceId, command);
-    const payload = this.extractPayload(raw, pidHex);
-    if (!payload) {
-      this.consecutiveErrors++;
-      return null;
+    timeoutMs = 135,
+  ): Promise<void> {
+    const now = Date.now();
+    const backoffUntil = this.pidBackoffUntil.get(command);
+    if (backoffUntil && now < backoffUntil) {
+      return; // Exponential backoff aktif: hattı tıkamadan anında geç
     }
-    this.consecutiveErrors = 0;
-    this.lastSuccessTimestamp = Date.now();
-    return parser(payload);
+
+    const raw = await this.sendCommand(deviceId, command, timeoutMs);
+    const payload = this.extractPayload(raw, pidHex);
+
+    if (payload) {
+      this.pidTimeoutCounts.set(command, 0);
+      this.pidBackoffUntil.delete(command);
+      this.consecutiveErrors = 0;
+      this.lastSuccessTimestamp = now;
+      const val = parser(payload);
+
+      // İlgili state'i güncelle
+      switch (pidHex) {
+        case "0C": if (val !== null) this.state.rpm = val; break;
+        case "0D": if (val !== null) this.state.speed_kmh = val; break;
+        case "0B": if (val !== null) this.state.map_kpa = val; break;
+        case "11": if (val !== null) this.state.throttle_percent = val; break;
+        case "10": if (val !== null) this.state.maf_gps = val; break;
+        case "05": if (val !== null) this.state.coolant_temp_c = val; break;
+        case "0F": if (val !== null) this.state.intake_temp_c = val; break;
+        case "04": if (val !== null) this.state.load_percent = val; break;
+        case "21": if (val !== null) this.state.distance_mil_on = val; break;
+      }
+    } else {
+      // Timeout veya geçersiz yanıt
+      const timeouts = (this.pidTimeoutCounts.get(command) || 0) + 1;
+      this.pidTimeoutCounts.set(command, timeouts);
+      this.consecutiveErrors++;
+
+      if (timeouts >= 3) {
+        const delay = timeouts === 3 ? 600 : timeouts === 4 ? 1500 : 4000;
+        this.pidBackoffUntil.set(command, now + delay);
+      }
+    }
   }
 
   private extractPayload(rawText: string, pidHex: string): number[] | null {
+    if (!rawText) return null;
     const normalized = rawText.toUpperCase().replace(/[^0-9A-F]/g, "");
     const marker = `41${pidHex}`;
     const pos = normalized.indexOf(marker);
@@ -619,15 +625,7 @@ export class MobileObdBleService {
 
     const tail = normalized.slice(pos + marker.length);
     const bytesNeeded: Record<string, number> = {
-      "0C": 2,
-      "0D": 1,
-      "05": 1,
-      "10": 2,
-      "04": 1,
-      "0B": 1,
-      "0F": 1,
-      "11": 1,
-      "21": 2,
+      "0C": 2, "0D": 1, "05": 1, "10": 2, "04": 1, "0B": 1, "0F": 1, "11": 1, "21": 2,
     };
 
     const needed = bytesNeeded[pidHex];
@@ -641,209 +639,170 @@ export class MobileObdBleService {
     return bytes;
   }
 
-  private parseRpm(data: number[]): number | null {
-    if (data.length < 2) return null;
-    return ((data[0] * 256) + data[1]) / 4.0;
-  }
+  private parseRpm = (b: number[]) => Math.round(((b[0] * 256) + b[1]) / 4);
+  private parseSpeed = (b: number[]) => b[0];
+  private parseCoolant = (b: number[]) => b[0] - 40;
+  private parseMaf = (b: number[]) => Math.round((((b[0] * 256) + b[1]) / 100) * 100) / 100;
+  private parseLoad = (b: number[]) => Math.round(((b[0] * 100) / 255) * 10) / 10;
+  private parseIntakeTemp = (b: number[]) => b[0] - 40;
+  private parseThrottle = (b: number[]) => Math.round(((b[0] * 100) / 255) * 10) / 10;
+  private parseMap = (b: number[]) => b[0];
+  private parseDistance = (b: number[]) => (b[0] * 256) + b[1];
 
-  private parseSpeed(data: number[]): number | null {
-    return data.length ? data[0] : null;
-  }
+  private updateCalculations() {
+    // Turbo Boost Hesabı
+    if (this.state.map_kpa !== null) {
+      const boost = (this.state.map_kpa - 101.3) / 100.0;
+      this.state.turbo_boost_bar = Math.max(0, Math.round(boost * 100) / 100);
+    }
 
-  private parseCoolant(data: number[]): number | null {
-    return data.length ? data[0] - 40 : null;
-  }
+    // Dizel Yakıt Modeli (1ND-TV)
+    if (this.state.maf_gps !== null) {
+      const spd = this.state.speed_kmh ?? 0;
+      const thr = this.state.throttle_percent ?? 0;
+      const rpm = this.state.rpm ?? 850;
 
-  private parseMaf(data: number[]): number | null {
-    if (data.length < 2) return null;
-    return ((data[0] * 256) + data[1]) / 100.0;
-  }
+      if (spd > 15 && thr < 2.0 && rpm > 1150) {
+        this.state.fuel_display = 0.0;
+        this.state.fuel_unit = "L/100km";
+        this.state.fuel_rate_lph = 0.0;
+      } else {
+        const clampedLoad = Math.max(0, Math.min(100, this.state.load_percent ?? 20));
+        const loadFactor = Math.pow(1.0 - clampedLoad / 100.0, 3.0);
+        const effectiveAfr = MIN_DIESEL_AFR + (MAX_DIESEL_AFR - MIN_DIESEL_AFR) * loadFactor;
 
-  private parseLoad(data: number[]): number | null {
-    return data.length ? (data[0] * 100.0) / 255.0 : null;
-  }
+        const fuelMassGps = this.state.maf_gps / effectiveAfr;
+        const litersPerHour = (fuelMassGps * 3600.0) / DIESEL_DENSITY_G_PER_L;
 
-  private parseMap(data: number[]): number | null {
-    return data.length ? data[0] : null;
-  }
-
-  private parseIntakeTemp(data: number[]): number | null {
-    return data.length ? data[0] - 40 : null;
-  }
-
-  private parseThrottle(data: number[]): number | null {
-    return data.length ? (data[0] * 100.0) / 255.0 : null;
-  }
-
-  private parseDistance(data: number[]): number | null {
-    if (data.length < 2) return null;
-    return ((data[0] * 256) + data[1]);
-  }
-
-  private calculateTurboBoost(mapKpa: number | null, rpm: number | null): number | null {
-    if (mapKpa === null) return null;
-
-    if (rpm !== null && rpm < 300) {
-      if (mapKpa >= 80.0 && mapKpa <= 110.0) {
-        this.ambientPressureKpa = mapKpa;
+        if (spd > 5.0) {
+          const lPer100 = (litersPerHour / spd) * 100.0;
+          this.state.fuel_display = Math.min(35.0, Math.round(lPer100 * 100) / 100);
+          this.state.fuel_unit = "L/100km";
+        } else {
+          this.state.fuel_display = Math.round(litersPerHour * 100) / 100;
+          this.state.fuel_unit = "L/h";
+        }
+        this.state.fuel_rate_lph = Math.round(litersPerHour * 1000) / 1000;
       }
     }
 
-    const boostBar = (mapKpa - this.ambientPressureKpa) / 100.0;
-    return Math.max(0, Math.round(boostBar * 100) / 100);
-  }
-
-  private calculateDieselFuel(
-    mafGps: number | null,
-    speedKmh: number | null,
-    loadPercent: number | null,
-    rpm: number | null,
-    throttlePercent: number | null,
-  ): [number | null, string, number | null] {
-    if (mafGps === null || speedKmh === null) {
-      return [null, "--", null];
-    }
-
-    // 1. Kompresyonda Gaz Kesme (Deceleration Fuel Cut-off)
-    let isCoasting = false;
-    if (rpm !== null && rpm > 1150) {
-      if (throttlePercent !== null && throttlePercent < 2.0) {
-        isCoasting = true;
-      } else if (loadPercent !== null && loadPercent < 8.0) {
-        isCoasting = true;
-      }
-    }
-
-    if (isCoasting && speedKmh > 15.0) {
-      return [0.0, "L/100km", 0.0];
-    }
-
-    // 2. Non-Lineer Dizel Efektif AFR (Toyota 1.4 D-4D Karakteristigi)
-    let effectiveAfr = CRUISE_DEFAULT_AFR;
-    if (loadPercent !== null) {
-      const clampedLoad = Math.max(0, Math.min(100, loadPercent));
-      const loadFactor = Math.pow(1.0 - clampedLoad / 100.0, 3.0);
-      effectiveAfr = MIN_DIESEL_AFR + (MAX_DIESEL_AFR - MIN_DIESEL_AFR) * loadFactor;
-    }
-
-    const fuelMassGps = mafGps / effectiveAfr;
-    const litersPerHour = (fuelMassGps * 3600.0) / DIESEL_DENSITY_G_PER_L;
-
-    if (speedKmh > 5.0) {
-      const lPer100km = (litersPerHour / speedKmh) * 100.0;
-      return [
-        Math.min(35.0, Math.round(lPer100km * 100) / 100),
-        "L/100km",
-        Math.round(litersPerHour * 1000) / 1000,
-      ];
-    } else {
-      return [
-        Math.round(litersPerHour * 100) / 100,
-        "L/h",
-        Math.round(litersPerHour * 1000) / 1000,
-      ];
-    }
+    this.state.updated_at = String(Date.now());
   }
 
   public async queryBatteryVoltage(deviceId?: string): Promise<number | null> {
+    if (this.isNativeBridge) {
+      try {
+        const res = await AuraNativeBle.sendCustomCommand({ command: "ATRV", timeout: 200 });
+        const match = (res.response || "").match(/(\d+\.?\d*)\s*V?/i);
+        if (match && match[1]) {
+          const val = parseFloat(match[1]);
+          if (!isNaN(val) && val >= 5.0 && val <= 18.0) return Math.round(val * 10) / 10;
+        }
+      } catch {}
+      return null;
+    }
+
     const targetId = deviceId || this.connectedDeviceId;
     if (!targetId || !this.state.connected) return null;
     try {
-      const raw = await this.sendCommand(targetId, "ATRV", 400);
+      const raw = await this.sendCommand(targetId, "ATRV", 250);
       const match = raw.match(/(\d+\.?\d*)\s*V?/i);
       if (match && match[1]) {
         const val = parseFloat(match[1]);
-        if (!isNaN(val) && val >= 5.0 && val <= 18.0) {
-          return Math.round(val * 10) / 10;
-        }
+        if (!isNaN(val) && val >= 5.0 && val <= 18.0) return Math.round(val * 10) / 10;
       }
-    } catch {
-      // Ignore
-    }
+    } catch {}
     return null;
   }
 
-  /**
-   * OBD-II Mode 03 ile Aktif Arıza Kodlarını (DTC) Oku
-   */
   public async readDtcCodes(): Promise<DtcItem[]> {
-    if (!this.connectedDeviceId || !this.state.connected) {
-      throw new Error("OBD-II adaptörü bağlı değil");
+    let raw = "";
+    if (this.isNativeBridge) {
+      const res = await AuraNativeBle.sendCustomCommand({ command: "03", timeout: 1200 });
+      raw = res.response || "";
+    } else {
+      if (!this.connectedDeviceId || !this.state.connected) throw new Error("OBD-II adaptörü bağlı değil");
+      raw = await this.sendCommand(this.connectedDeviceId, "03", 1200);
     }
 
+    const normalized = raw.toUpperCase().replace(/[^0-9A-F]/g, "");
+    const pos = normalized.indexOf("43");
+    if (pos === -1) return [];
+
+    const tail = normalized.slice(pos + 2);
+    const codes: DtcItem[] = [];
+
+    for (let i = 0; i + 4 <= tail.length; i += 4) {
+      const chunk = tail.slice(i, i + 4);
+      if (chunk === "0000") continue;
+
+      const firstByte = parseInt(chunk[0], 16);
+      const systemBits = (firstByte >> 2) & 0x03;
+      const codeTypeBit = firstByte & 0x03;
+
+      let prefix = "P";
+      let systemType: DtcItem["system"] = "Motor";
+      if (systemBits === 1) { prefix = "C"; systemType = "Şasi"; }
+      else if (systemBits === 2) { prefix = "B"; systemType = "Gövde"; }
+      else if (systemBits === 3) { prefix = "U"; systemType = "Ağ"; }
+
+      const codeStr = `${prefix}${codeTypeBit}${chunk.slice(1)}`;
+      const dbInfo = DTC_DATABASE[codeStr] || {
+        description: "Genel OBD-II Teşhis Arıza Kodu",
+        system: systemType,
+        severity: "Orta" as const,
+      };
+
+      codes.push({
+        code: codeStr,
+        description: dbInfo.description,
+        system: dbInfo.system,
+        severity: dbInfo.severity,
+      });
+    }
+
+    return codes;
+  }
+
+  public async clearDtcCodes(): Promise<boolean> {
+    let raw = "";
+    if (this.isNativeBridge) {
+      const res = await AuraNativeBle.sendCustomCommand({ command: "04", timeout: 1500 });
+      raw = res.response || "";
+    } else {
+      if (!this.connectedDeviceId || !this.state.connected) throw new Error("OBD-II adaptörü bağlı değil");
+      raw = await this.sendCommand(this.connectedDeviceId, "04", 1500);
+    }
+
+    const normalized = raw.toUpperCase().replace(/[^0-9A-F]/g, "");
+    const isSuccess = normalized.includes("44") || normalized.includes("OK");
+    if (isSuccess) {
+      this.state.distance_mil_on = 0;
+      this.notifyListeners();
+    }
+    return isSuccess;
+  }
+
+  private saveDevice(deviceId: string, name?: string) {
     try {
-      const raw = await this.sendCommand(this.connectedDeviceId, "03", 1200);
-      const normalized = raw.toUpperCase().replace(/[^0-9A-F]/g, "");
+      localStorage.setItem(STORAGE_KEY_LAST_DEVICE_ID, deviceId);
+      if (name) localStorage.setItem(STORAGE_KEY_LAST_DEVICE_NAME, name);
+    } catch {}
+  }
 
-      const pos = normalized.indexOf("43");
-      if (pos === -1) {
-        return [];
-      }
-
-      const tail = normalized.slice(pos + 2);
-      const codes: DtcItem[] = [];
-
-      for (let i = 0; i + 4 <= tail.length; i += 4) {
-        const chunk = tail.slice(i, i + 4);
-        if (chunk === "0000") continue;
-
-        const firstByte = parseInt(chunk[0], 16);
-        const systemBits = (firstByte >> 2) & 0x03;
-        const codeTypeBit = firstByte & 0x03;
-
-        let prefix = "P";
-        let systemType: DtcItem["system"] = "Motor";
-        if (systemBits === 1) {
-          prefix = "C";
-          systemType = "Şasi";
-        } else if (systemBits === 2) {
-          prefix = "B";
-          systemType = "Gövde";
-        } else if (systemBits === 3) {
-          prefix = "U";
-          systemType = "Ağ";
-        }
-
-        const codeStr = `${prefix}${codeTypeBit}${chunk.slice(1)}`;
-        const dbInfo = DTC_DATABASE[codeStr] || {
-          description: "Genel OBD-II Teşhis Arıza Kodu",
-          system: systemType,
-          severity: "Orta" as const,
-        };
-
-        codes.push({
-          code: codeStr,
-          description: dbInfo.description,
-          system: dbInfo.system,
-          severity: dbInfo.severity,
-        });
-      }
-
-      return codes;
-    } catch (err: any) {
-      throw new Error("Arıza kodları okunamadı: " + (err?.message || err));
+  public getSavedDeviceId(): string | null {
+    try {
+      return localStorage.getItem(STORAGE_KEY_LAST_DEVICE_ID);
+    } catch {
+      return null;
     }
   }
 
-  /**
-   * OBD-II Mode 04 ile Arıza Kodlarını ve Motor Lambasını Söndür (Clear DTC)
-   */
-  public async clearDtcCodes(): Promise<boolean> {
-    if (!this.connectedDeviceId || !this.state.connected) {
-      throw new Error("OBD-II adaptörü bağlı değil");
-    }
-
+  public getSavedDeviceName(): string | null {
     try {
-      const raw = await this.sendCommand(this.connectedDeviceId, "04", 1500);
-      const normalized = raw.toUpperCase().replace(/[^0-9A-F]/g, "");
-      const isSuccess = normalized.includes("44") || normalized.includes("OK");
-      if (isSuccess) {
-        this.state.distance_mil_on = 0;
-        this.notifyListeners();
-      }
-      return isSuccess;
-    } catch (err: any) {
-      throw new Error("Arıza kodları silinemedi: " + (err?.message || err));
+      return localStorage.getItem(STORAGE_KEY_LAST_DEVICE_NAME);
+    } catch {
+      return null;
     }
   }
 }
