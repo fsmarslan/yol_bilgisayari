@@ -7,6 +7,7 @@ import { Capacitor } from "@capacitor/core";
 import { obdBleService, type TelemetryState, type DtcItem, DTC_DATABASE } from "./services/obd-ble.service";
 import { backgroundService } from "./services/background.service";
 import TripRouteMap, { type GpsPoint } from "./components/TripRouteMap";
+import AuraLogo from "./components/AuraLogo";
 
 type DashboardTab = "surus" | "trip" | "performans" | "motor" | "saglik";
 type CockpitTheme = "cyber-cyan" | "gr-red" | "amber" | "emerald";
@@ -1405,7 +1406,10 @@ export default function Home() {
       >
         {/* Üst Mini Başlık ve Vites */}
         <div className="flex w-full items-center justify-between px-1 text-[10px] font-bold">
-          <span className="text-primary tracking-widest text-[9px] uppercase">AuraDrive HUD</span>
+          <div className="flex items-center gap-1.5">
+            <AuraLogo size={18} variant="icon-only" />
+            <span className="text-primary tracking-widest text-[9px] uppercase">AuraDrive HUD</span>
+          </div>
           <span className="rounded-md border border-primary/40 bg-primary/20 px-1.5 py-0.5 text-primary text-[10px]">
             VİTES {currentGear}
           </span>
@@ -1424,21 +1428,21 @@ export default function Home() {
         {/* Alt Hızlı Bilgi Şeridi */}
         <div className="flex w-full items-center justify-around border-t border-white/15 pt-1 text-center">
           <div>
-            <div className="text-[8px] text-muted">YAKIT</div>
-            <div className="text-xs font-bold text-amber-300 tabular-nums">
-              {fuel !== null ? fuel.toFixed(1) : "--"} <span className="text-[7px] text-muted">{fuelUnit}</span>
+            <div className="text-[8px] text-muted tracking-wider">TÜKETİM</div>
+            <div className="text-xs font-bold text-white tabular-nums">
+              {fuel !== null ? `${fuel.toFixed(1)} ${fuelUnit}` : "--"}
             </div>
           </div>
           <div>
-            <div className="text-[8px] text-muted">DEVİR</div>
-            <div className="text-xs font-bold text-cyan-300 tabular-nums">
-              {rpm ?? "--"} <span className="text-[7px] text-muted">D/D</span>
+            <div className="text-[8px] text-muted tracking-wider">DEVİR</div>
+            <div className="text-xs font-bold text-white tabular-nums">
+              {rpm ?? "--"} <span className="text-[8px] text-muted">RPM</span>
             </div>
           </div>
           <div>
-            <div className="text-[8px] text-muted">AKÜ</div>
-            <div className={`text-xs font-bold tabular-nums ${batteryVoltage && batteryVoltage >= 13.5 ? "text-emerald-400" : "text-amber-400"}`}>
-              {batteryVoltage !== null ? `${batteryVoltage.toFixed(1)}V` : "--"}
+            <div className="text-[8px] text-muted tracking-wider">VOLTAJ</div>
+            <div className="text-xs font-bold text-amber-400 tabular-nums">
+              {data?.battery_voltage ? `${data.battery_voltage.toFixed(1)}V` : "--"}
             </div>
           </div>
         </div>
@@ -1459,6 +1463,7 @@ export default function Home() {
           <div className="flex flex-wrap items-center justify-between gap-2">
             {/* Araç Modeli ve Durum Rozeti */}
             <div className="flex items-center gap-2.5">
+              <AuraLogo size="md" variant="icon-only" className="drop-shadow-[0_0_12px_rgba(6,182,212,0.35)]" />
               <div className="flex h-8 items-center rounded-lg border border-primary/30 bg-primary/10 px-2.5 text-xs font-bold tracking-widest text-primary font-display">
                 TOYOTA
               </div>
