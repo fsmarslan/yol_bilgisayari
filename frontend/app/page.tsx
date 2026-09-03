@@ -1463,7 +1463,14 @@ export default function Home() {
           <div className="flex flex-wrap items-center justify-between gap-2">
             {/* Araç Modeli ve Durum Rozeti */}
             <div className="flex items-center gap-2.5">
-              <AuraLogo size="md" variant="icon-only" className="drop-shadow-[0_0_12px_rgba(6,182,212,0.35)]" />
+              {/* Resmi 2006 Corolla E120 Launcher Rozeti (36x36 px) */}
+              <div className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-amber-500/50 bg-black/80 shadow-[0_0_12px_rgba(245,158,11,0.35)] transition-transform hover:scale-105" title="2006 Toyota Corolla 1.4 D-4D">
+                <img
+                  src="/icon.png"
+                  alt="2006 Toyota Corolla E120"
+                  className="h-full w-full object-cover"
+                />
+              </div>
               <div className="flex h-8 items-center rounded-lg border border-primary/30 bg-primary/10 px-2.5 text-xs font-bold tracking-widest text-primary font-display">
                 TOYOTA
               </div>
