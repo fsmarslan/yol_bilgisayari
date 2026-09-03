@@ -335,8 +335,8 @@ export class MobileObdBleService {
       await this.streamFastStep(device.deviceId, subTick);
       subTick = (subTick + 1) % 6;
 
-      // Bluetooth bandını rahatlatma payı (A2DP müzik akışının tıkanmasını engeller)
-      await new Promise((r) => setTimeout(r, 20));
+      // Bluetooth bandını rahatlatma payı (A2DP müzik akışının ve navigasyonun tıkanmasını engeller)
+      await new Promise((r) => setTimeout(r, 24));
 
       // Sağlık ve Kilitlenme Kontrolü (Watchdog)
       const now = Date.now();
@@ -456,26 +456,32 @@ export class MobileObdBleService {
   private async streamFastStep(deviceId: string, tick: number) {
     const now = Date.now();
 
+    const isForeground = typeof document === "undefined" || document.visibilityState === "visible";
+
     // 1. Yüksek Öncelik: RPM
     const rpm = await this.queryPid(deviceId, "010C", "0C", this.parseRpm);
     if (rpm !== null) {
       this.state.rpm = rpm;
-      this.updateCalculations();
-      this.notifyListeners();
+      if (isForeground) {
+        this.updateCalculations();
+        this.notifyListeners();
+      }
     }
 
-    // Bluetooth paket kuyruğunu rahatlatmak için mikro aralık
-    await new Promise((r) => setTimeout(r, 15));
+    // Bluetooth paket kuyruğunu rahatlatmak için mikro aralık (A2DP müzik tamponuna öncelik)
+    await new Promise((r) => setTimeout(r, 16));
 
     // 2. Yüksek Öncelik: Hız
     const speed = await this.queryPid(deviceId, "010D", "0D", this.parseSpeed);
     if (speed !== null) {
       this.state.speed_kmh = speed;
-      this.updateCalculations();
-      this.notifyListeners();
+      if (isForeground) {
+        this.updateCalculations();
+        this.notifyListeners();
+      }
     }
 
-    await new Promise((r) => setTimeout(r, 15));
+    await new Promise((r) => setTimeout(r, 16));
 
     // 3. Dönen İkincil PID'ler
     switch (tick) {
@@ -663,11 +669,11 @@ export class MobileObdBleService {
       return [0.0, "L/100km", 0.0];
     }
 
-    // 2. Non-Lineer Dizel Efektif AFR
+    // 2. Non-Lineer Dizel Efektif AFR (Toyota 1.4 D-4D Karakteristigi)
     let effectiveAfr = CRUISE_DEFAULT_AFR;
     if (loadPercent !== null) {
       const clampedLoad = Math.max(0, Math.min(100, loadPercent));
-      const loadFactor = Math.pow(1.0 - clampedLoad / 100.0, 2.2);
+      const loadFactor = Math.pow(1.0 - clampedLoad / 100.0, 3.0);
       effectiveAfr = MIN_DIESEL_AFR + (MAX_DIESEL_AFR - MIN_DIESEL_AFR) * loadFactor;
     }
 

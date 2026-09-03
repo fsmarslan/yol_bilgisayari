@@ -50,8 +50,8 @@ class OBDService:
     def _calculate_fuel_l100km(maf_gps: Optional[float], speed_kmh: Optional[float]) -> Optional[float]:
         if maf_gps is None or speed_kmh is None or speed_kmh <= 0:
             return None
-
-        return ((maf_gps * 3600) / (14.7 * 740)) / speed_kmh * 100
+        # Toyota 1.4 D-4D Euro Diesel: Yogunluk ~840 g/L, Ortalama efektif AFR ~31.0
+        return ((maf_gps * 3600.0) / (31.0 * 840.0)) / speed_kmh * 100.0
 
     def get_telemetry(self) -> TelemetryData:
         try:

@@ -549,11 +549,11 @@ class BleTelemetryManager:
         # Dizelde yuk arttikca AFR lineer degil, hizla stoikiometriye dogru inen bir egri izler.
         if load_percent is not None:
             clamped_load = max(0.0, min(100.0, load_percent))
-            # Yuk %0 (rolanti/cok hafif yuk) -> AFR ~65:1 (fakir)
-            # Yuk %30 (90 km/h cruise) -> AFR ~35-38:1 (3.8-4.2 L/100km)
-            # Yuk %50 (orta hizlanma) -> AFR ~28-30:1
+            # Yuk %0 (rolanti/cok hafif yuk) -> AFR ~55:1 (fakir)
+            # Yuk %30 (90 km/h cruise) -> AFR ~32-33:1 (3.8-4.1 L/100km)
+            # Yuk %50 (orta hizlanma) -> AFR ~24:1
             # Yuk %100 (tam gaz dip gaz) -> AFR ~17.5:1 (tam guc)
-            load_factor = (1.0 - (clamped_load / 100.0)) ** 2.2
+            load_factor = (1.0 - (clamped_load / 100.0)) ** 3.0
             effective_afr = MIN_DIESEL_AFR + ((MAX_DIESEL_AFR - MIN_DIESEL_AFR) * load_factor)
         else:
             effective_afr = CRUISE_DEFAULT_AFR

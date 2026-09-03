@@ -632,6 +632,8 @@ export default function Home() {
   const [tripSubView, setTripSubView] = useState<"current" | "history">("current");
   const [selectedMapTrip, setSelectedMapTrip] = useState<CompletedTrip | null>(null);
   const lastUpdateRef = useRef<number | null>(null);
+  const isTripArchivedRef = useRef(false);
+  const lastStorageSaveRef = useRef<number>(0);
 
   // GPS Geolocation Takibi
   const [gpsActive, setGpsActive] = useState(false);
@@ -677,7 +679,7 @@ export default function Home() {
         } else {
           const dist = calculateDistanceMeters(last.lat, last.lng, newPoint.lat, newPoint.lng);
           const timeDiff = newPoint.timestamp - last.timestamp;
-          if (dist >= 8 || (dist >= 3 && timeDiff >= 5000)) {
+          if (dist >= 10 || (dist >= 4 && timeDiff >= 6000)) {
             shouldRecord = true;
           }
         }
@@ -693,8 +695,8 @@ export default function Home() {
       },
       {
         enableHighAccuracy: true,
-        maximumAge: 2000,
-        timeout: 10000,
+        maximumAge: 3000,
+        timeout: 12000,
       }
     );
 
@@ -774,7 +776,9 @@ export default function Home() {
     const deltaSeconds = (now - lastUpdateRef.current) / 1000;
     lastUpdateRef.current = now;
 
-    if (deltaSeconds <= 0 || deltaSeconds > 3.0) {
+    // Arka planda navigasyon açıkken veya ekran kilitliyken Android WebView timer gecikmelerini tolere et (12 sn)
+    // Gerçek kopma durumlarında (12 sn üzeri) devasa boşluk atlanır
+    if (deltaSeconds <= 0 || deltaSeconds > 12.0) {
       return;
     }
 
@@ -796,6 +800,10 @@ export default function Home() {
     const deltaDurationMs = deltaSeconds * 1000;
     const deltaMovingMs = speed > 1.5 ? deltaDurationMs : 0;
 
+    if (deltaDistanceKm > 0.005 || deltaFuelLiters > 0.001) {
+      isTripArchivedRef.current = false;
+    }
+
     setTrip((prev) => {
       const updated: TripData = {
         distanceKm: prev.distanceKm + deltaDistanceKm,
@@ -806,10 +814,14 @@ export default function Home() {
         startTime: prev.startTime || now,
       };
 
-      try {
-        localStorage.setItem(STORAGE_KEY_TRIP, JSON.stringify(updated));
-      } catch {
-        // Save error
+      // Arka planda CPU ve depolamayı yormamak için diske 2 saniyede bir yaz (batarya & navigasyon akıcılığı)
+      if (now - lastStorageSaveRef.current > 2000) {
+        lastStorageSaveRef.current = now;
+        try {
+          localStorage.setItem(STORAGE_KEY_TRIP, JSON.stringify(updated));
+        } catch {
+          // Save error
+        }
       }
 
       return updated;
@@ -826,8 +838,8 @@ export default function Home() {
       fuelLiters: Math.round(trip.fuelLiters * 100) / 100,
       fuelCostTL: Math.round(tripTotalCostTL * 100) / 100,
       fuelPrice: fuelPrice,
-      avgFuelL100km: avgFuelL100km ? Math.round(avgFuelL100km * 100) / 100 : null,
-      avgSpeedKmh: avgSpeedKmh ? Math.round(avgSpeedKmh) : null,
+      avgFuelL100km: avgFuelL100km !== null && avgFuelL100km !== undefined ? Math.round(avgFuelL100km * 100) / 100 : null,
+      avgSpeedKmh: avgSpeedKmh !== null && avgSpeedKmh !== undefined ? Math.round(avgSpeedKmh) : null,
       maxSpeed: Math.round(trip.maxSpeed),
       durationMs: trip.durationMs,
       movingDurationMs: trip.movingDurationMs,
@@ -836,6 +848,7 @@ export default function Home() {
 
     const updatedHistory = [completed, ...tripHistory];
     setTripHistory(updatedHistory);
+    isTripArchivedRef.current = true;
     try {
       localStorage.setItem(STORAGE_KEY_TRIP_HISTORY, JSON.stringify(updatedHistory));
     } catch {
@@ -844,7 +857,7 @@ export default function Home() {
   };
 
   const resetTrip = () => {
-    if (trip.distanceKm >= 0.05 || routePoints.length >= 2) {
+    if (!isTripArchivedRef.current && (trip.distanceKm >= 0.05 || routePoints.length >= 2)) {
       archiveCurrentTrip();
     }
 
@@ -858,6 +871,7 @@ export default function Home() {
     };
     setTrip(fresh);
     setRoutePoints([]);
+    isTripArchivedRef.current = false;
     lastRecordedGpsRef.current = null;
     lastUpdateRef.current = null;
     try {
@@ -959,7 +973,7 @@ export default function Home() {
     if (speed === null) return;
 
     if (speed <= 0.8) {
-      if (perf.status !== "ready" && perf.status !== "finished") {
+      if (perf.status !== "ready") {
         setPerf((prev) => ({ ...prev, status: "ready", startTime: null }));
         dragStartTimeRef.current = null;
       }
