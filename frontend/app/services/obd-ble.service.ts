@@ -6,6 +6,13 @@ import {
   dataViewToNumbers,
 } from "@capacitor-community/bluetooth-le";
 
+export type DtcItem = {
+  code: string;
+  description: string;
+  system: "Motor" | "Şanzıman" | "Gövde" | "Şasi" | "Ağ";
+  severity: "Kritik" | "Orta" | "Düşük";
+};
+
 export type TelemetryState = {
   connected: boolean;
   connecting: boolean;
@@ -22,6 +29,7 @@ export type TelemetryState = {
   fuel_display: number | null;
   fuel_unit: string;
   fuel_rate_lph: number | null;
+  battery_voltage: number | null;
   last_error: string | null;
   updated_at: string | null;
 };
@@ -41,6 +49,42 @@ const DIESEL_DENSITY_G_PER_L = 840.0;
 const MIN_DIESEL_AFR = 17.5;
 const MAX_DIESEL_AFR = 65.0;
 const CRUISE_DEFAULT_AFR = 32.0;
+
+// Yaygın OBD-II & Toyota Arıza Kodları Sözlüğü
+export const DTC_DATABASE: Record<string, { description: string; system: DtcItem["system"]; severity: DtcItem["severity"] }> = {
+  P0100: { description: "Kütle Hava Akış (MAF) Sensör Devresi Arızası", system: "Motor", severity: "Orta" },
+  P0101: { description: "Kütle Hava Akış Sensörü Aralık / Performans Sorunu", system: "Motor", severity: "Orta" },
+  P0102: { description: "Kütle Hava Akış Sensörü Düşük Sinyal Girişi", system: "Motor", severity: "Orta" },
+  P0103: { description: "Kütle Hava Akış Sensörü Yüksek Sinyal Girişi", system: "Motor", severity: "Orta" },
+  P0105: { description: "Manifold Mutlak Basınç (MAP) Sensör Devresi Arızası", system: "Motor", severity: "Kritik" },
+  P0106: { description: "Manifold Basınç Sensörü Performans Hatası", system: "Motor", severity: "Orta" },
+  P0110: { description: "Emme Havası Sıcaklık (IAT) Sensör Devresi", system: "Motor", severity: "Düşük" },
+  P0115: { description: "Motor Soğutma Suyu Sıcaklık (ECT) Devresi", system: "Motor", severity: "Kritik" },
+  P0116: { description: "Soğutma Suyu Sıcaklık Sensörü Aralık / Performans", system: "Motor", severity: "Orta" },
+  P0120: { description: "Gaz Pedalı / Kelebek Pozisyon Sensörü 'A' Devresi", system: "Motor", severity: "Kritik" },
+  P0121: { description: "Gaz Pedalı Pozisyon Sensörü Aralık Sorunu", system: "Motor", severity: "Orta" },
+  P0200: { description: "Enjektör Devresi Genel Arıza", system: "Motor", severity: "Kritik" },
+  P0201: { description: "Silindir 1 Enjektör Devresi Açık / Arıza", system: "Motor", severity: "Kritik" },
+  P0202: { description: "Silindir 2 Enjektör Devresi Açık / Arıza", system: "Motor", severity: "Kritik" },
+  P0203: { description: "Silindir 3 Enjektör Devresi Açık / Arıza", system: "Motor", severity: "Kritik" },
+  P0204: { description: "Silindir 4 Enjektör Devresi Açık / Arıza", system: "Motor", severity: "Kritik" },
+  P0234: { description: "Turboşarj Aşırı Basınç (Overboost) Durumu", system: "Motor", severity: "Kritik" },
+  P0238: { description: "Turbo Basınç Sensörü 'A' Devresi Yüksek Giriş", system: "Motor", severity: "Kritik" },
+  P0299: { description: "Turboşarj Düşük Basınç (Underboost) Durumu", system: "Motor", severity: "Orta" },
+  P0300: { description: "Rastgele Silindir Ateşleme / Yanma Hatası", system: "Motor", severity: "Kritik" },
+  P0380: { description: "Kızdırma Bujisi Devresi 'A' Arızası (Isıtma Bujileri)", system: "Motor", severity: "Orta" },
+  P0400: { description: "Egzoz Gazı Devridaimi (EGR) Akış Arızası (Tıkanıklık/Kurum)", system: "Motor", severity: "Orta" },
+  P0401: { description: "EGR Sistemi Yetersiz Akış Algılandı (EGR Valfi Temizlenmeli)", system: "Motor", severity: "Orta" },
+  P0402: { description: "EGR Sistemi Aşırı Akış Algılandı", system: "Motor", severity: "Orta" },
+  P0500: { description: "Araç Hız Sensörü (VSS) Devresi Arızası", system: "Motor", severity: "Kritik" },
+  P0560: { description: "Sistem Voltajı Kararsız / Düşük", system: "Motor", severity: "Orta" },
+  P0627: { description: "Yakıt Pompası Kontrol Devresi Açık", system: "Motor", severity: "Kritik" },
+  P0700: { description: "Şanzıman Kontrol Sistemi Hatası", system: "Şanzıman", severity: "Kritik" },
+  P2002: { description: "Dizel Partikül Filtresi (DPF) Verimlilik Sınırı Altında", system: "Motor", severity: "Orta" },
+  C1201: { description: "Toyota Motor Kontrol Sistemi Arızası (ABS/VSC Devre Dışı)", system: "Şasi", severity: "Orta" },
+  C1241: { description: "ABS Düşük Akü Voltajı Hatası", system: "Şasi", severity: "Düşük" },
+  U0100: { description: "ECM/PCM (Motor Beyni) İletişim Kaybı", system: "Ağ", severity: "Kritik" },
+};
 
 export class MobileObdBleService {
   private static instance: MobileObdBleService;
@@ -76,6 +120,7 @@ export class MobileObdBleService {
     fuel_display: null,
     fuel_unit: "--",
     fuel_rate_lph: null,
+    battery_voltage: null,
     last_error: null,
     updated_at: null,
   };
@@ -518,6 +563,10 @@ export class MobileObdBleService {
           const dist = await this.queryPid(deviceId, "0121", "21", this.parseDistance);
           if (dist !== null) this.state.distance_mil_on = dist;
 
+          await new Promise((r) => setTimeout(r, 12));
+          const voltage = await this.queryBatteryVoltage(deviceId);
+          if (voltage !== null) this.state.battery_voltage = voltage;
+
           this.lastSlowPollTime = now;
         }
         break;
@@ -693,6 +742,108 @@ export class MobileObdBleService {
         "L/h",
         Math.round(litersPerHour * 1000) / 1000,
       ];
+    }
+  }
+
+  public async queryBatteryVoltage(deviceId?: string): Promise<number | null> {
+    const targetId = deviceId || this.connectedDeviceId;
+    if (!targetId || !this.state.connected) return null;
+    try {
+      const raw = await this.sendCommand(targetId, "ATRV", 400);
+      const match = raw.match(/(\d+\.?\d*)\s*V?/i);
+      if (match && match[1]) {
+        const val = parseFloat(match[1]);
+        if (!isNaN(val) && val >= 5.0 && val <= 18.0) {
+          return Math.round(val * 10) / 10;
+        }
+      }
+    } catch {
+      // Ignore
+    }
+    return null;
+  }
+
+  /**
+   * OBD-II Mode 03 ile Aktif Arıza Kodlarını (DTC) Oku
+   */
+  public async readDtcCodes(): Promise<DtcItem[]> {
+    if (!this.connectedDeviceId || !this.state.connected) {
+      throw new Error("OBD-II adaptörü bağlı değil");
+    }
+
+    try {
+      const raw = await this.sendCommand(this.connectedDeviceId, "03", 1200);
+      const normalized = raw.toUpperCase().replace(/[^0-9A-F]/g, "");
+
+      const pos = normalized.indexOf("43");
+      if (pos === -1) {
+        return [];
+      }
+
+      const tail = normalized.slice(pos + 2);
+      const codes: DtcItem[] = [];
+
+      for (let i = 0; i + 4 <= tail.length; i += 4) {
+        const chunk = tail.slice(i, i + 4);
+        if (chunk === "0000") continue;
+
+        const firstByte = parseInt(chunk[0], 16);
+        const systemBits = (firstByte >> 2) & 0x03;
+        const codeTypeBit = firstByte & 0x03;
+
+        let prefix = "P";
+        let systemType: DtcItem["system"] = "Motor";
+        if (systemBits === 1) {
+          prefix = "C";
+          systemType = "Şasi";
+        } else if (systemBits === 2) {
+          prefix = "B";
+          systemType = "Gövde";
+        } else if (systemBits === 3) {
+          prefix = "U";
+          systemType = "Ağ";
+        }
+
+        const codeStr = `${prefix}${codeTypeBit}${chunk.slice(1)}`;
+        const dbInfo = DTC_DATABASE[codeStr] || {
+          description: "Genel OBD-II Teşhis Arıza Kodu",
+          system: systemType,
+          severity: "Orta" as const,
+        };
+
+        codes.push({
+          code: codeStr,
+          description: dbInfo.description,
+          system: dbInfo.system,
+          severity: dbInfo.severity,
+        });
+      }
+
+      return codes;
+    } catch (err: any) {
+      throw new Error("Arıza kodları okunamadı: " + (err?.message || err));
+    }
+  }
+
+  /**
+   * OBD-II Mode 04 ile Arıza Kodlarını ve Motor Lambasını Söndür (Clear DTC)
+   */
+  public async clearDtcCodes(): Promise<boolean> {
+    if (!this.connectedDeviceId || !this.state.connected) {
+      throw new Error("OBD-II adaptörü bağlı değil");
+    }
+
+    try {
+      const raw = await this.sendCommand(this.connectedDeviceId, "04", 1500);
+      const normalized = raw.toUpperCase().replace(/[^0-9A-F]/g, "");
+      const isSuccess = normalized.includes("44") || normalized.includes("OK");
+      if (isSuccess) {
+        this.state.distance_mil_on = 0;
+        this.notifyListeners();
+      }
+      return isSuccess;
+    } catch (err: any) {
+      throw new Error("Arıza kodları silinemedi: " + (err?.message || err));
     }
   }
 }

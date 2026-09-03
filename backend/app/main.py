@@ -67,6 +67,7 @@ async def get_data() -> dict[str, Any]:
         "fuel_l_per_100km": data.get("fuel_display") if data.get("fuel_unit") == "L/100km" else None,
         "fuel_display": data.get("fuel_display"),
         "fuel_unit": data.get("fuel_unit"),
+        "battery_voltage": data.get("battery_voltage"),
         "connected": data.get("connected"),
     }
 

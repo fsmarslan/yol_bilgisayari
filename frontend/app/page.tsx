@@ -4,7 +4,7 @@ import { animate, motion, AnimatePresence } from "framer-motion";
 import useSWR from "swr";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
-import { obdBleService, type TelemetryState } from "./services/obd-ble.service";
+import { obdBleService, type TelemetryState, type DtcItem, DTC_DATABASE } from "./services/obd-ble.service";
 import { backgroundService } from "./services/background.service";
 import TripRouteMap, { type GpsPoint } from "./components/TripRouteMap";
 
@@ -57,6 +57,7 @@ type LiveData = {
   fuel_display: number | null;
   fuel_unit: string;
   fuel_rate_lph?: number | null;
+  battery_voltage?: number | null;
   last_error: string | null;
   updated_at: string | null;
 };
@@ -454,6 +455,7 @@ export default function Home() {
     fuel_display: 0.6,
     fuel_unit: "L/h",
     fuel_rate_lph: 0.6,
+    battery_voltage: 14.2,
     last_error: null,
     updated_at: new Date().toISOString(),
   });
@@ -539,6 +541,7 @@ export default function Home() {
         fuel_display: Math.max(0, Math.round(fuel * 100) / 100),
         fuel_unit: unit,
         fuel_rate_lph: unit === "L/h" ? fuel : (fuel * speed) / 100,
+        battery_voltage: speed > 0 ? 14.2 : 13.9,
         last_error: null,
         updated_at: new Date().toISOString(),
       });
@@ -634,6 +637,15 @@ export default function Home() {
   const lastUpdateRef = useRef<number | null>(null);
   const isTripArchivedRef = useRef(false);
   const lastStorageSaveRef = useRef<number>(0);
+
+  // DTC (Arıza Kodları) State'leri
+  const [dtcCodes, setDtcCodes] = useState<DtcItem[]>([]);
+  const [isScanningDtc, setIsScanningDtc] = useState(false);
+  const [isClearingDtc, setIsClearingDtc] = useState(false);
+  const [dtcScanMessage, setDtcScanMessage] = useState<string | null>(null);
+
+  // Yüzen Mini Gösterge (Floating Mini PiP) State'i
+  const [isFloatingPipActive, setIsFloatingPipActive] = useState(false);
 
   // GPS Geolocation Takibi
   const [gpsActive, setGpsActive] = useState(false);
@@ -917,6 +929,74 @@ export default function Home() {
   };
 
   // ----------------------------------------------------
+  // ARİZA KODLARI (DTC) TEŞHİS VE SİLME MOTORU
+  // ----------------------------------------------------
+  const scanDtc = async () => {
+    if (isScanningDtc) return;
+    setIsScanningDtc(true);
+    setDtcScanMessage("ECU arıza hafızası taranıyor (Mode 03)...");
+    try {
+      if (demoMode) {
+        await new Promise((r) => setTimeout(r, 1200));
+        const demoCodes: DtcItem[] = [
+          {
+            code: "P0400",
+            description: DTC_DATABASE["P0400"]?.description || "EGR Akış Arızası (Kurum birikmesi)",
+            system: "Motor",
+            severity: "Orta",
+          },
+          {
+            code: "P0380",
+            description: DTC_DATABASE["P0380"]?.description || "Kızdırma Bujisi Devresi 'A' Arızası",
+            system: "Motor",
+            severity: "Orta",
+          },
+        ];
+        setDtcCodes(demoCodes);
+        setDtcScanMessage("2 adet arıza kodu algılandı (Simülasyon Modu).");
+      } else {
+        const codes = await obdBleService.readDtcCodes();
+        setDtcCodes(codes);
+        if (codes.length === 0) {
+          setDtcScanMessage("Tebrikler! Aktif herhangi bir arıza kodu (DTC) bulunamadı. Sistem temiz.");
+        } else {
+          setDtcScanMessage(`${codes.length} adet arıza kodu tespit edildi.`);
+        }
+      }
+    } catch (err: any) {
+      setDtcScanMessage(`Tarama Hatası: ${err?.message || err}`);
+    } finally {
+      setIsScanningDtc(false);
+    }
+  };
+
+  const clearDtc = async () => {
+    if (typeof window !== "undefined" && !window.confirm("Arıza kodlarını silmek ve Check Engine lambasını söndürmek istediğinize emin misiniz?")) {
+      return;
+    }
+    setIsClearingDtc(true);
+    try {
+      if (demoMode) {
+        await new Promise((r) => setTimeout(r, 1000));
+        setDtcCodes([]);
+        setDtcScanMessage("Arıza kodları silindi, Check Engine lambası söndürüldü (Simülasyon).");
+      } else {
+        const ok = await obdBleService.clearDtcCodes();
+        if (ok) {
+          setDtcCodes([]);
+          setDtcScanMessage("Arıza kodları başarıyla silindi ve arıza lambası söndürüldü.");
+        } else {
+          setDtcScanMessage("ECU silme komutunu onaylamadı.");
+        }
+      }
+    } catch (err: any) {
+      setDtcScanMessage(`Silme Hatası: ${err?.message || err}`);
+    } finally {
+      setIsClearingDtc(false);
+    }
+  };
+
+  // ----------------------------------------------------
   // PERFORMANS & 0-100 DRAG MOTORU
   // ----------------------------------------------------
   const [perf, setPerf] = useState<PerformanceData>(DEFAULT_PERF);
@@ -949,6 +1029,7 @@ export default function Home() {
   const map = data?.map_kpa ?? null;
   const fuel = data?.fuel_display ?? null;
   const fuelUnit = data?.fuel_unit ?? "--";
+  const batteryVoltage = data?.battery_voltage ?? null;
 
   // Peak Boost Takibi
   useEffect(() => {
@@ -1385,6 +1466,40 @@ export default function Home() {
               >
                 <span>⛽</span>
                 <span>{fuelPrice.toFixed(2)} ₺</span>
+              </button>
+
+              {/* Akü / Şarj Voltajı Rozeti */}
+              <div
+                className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[10px] font-bold tracking-wider ${
+                  batteryVoltage !== null && batteryVoltage >= 13.5
+                    ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.2)]"
+                    : batteryVoltage !== null && batteryVoltage < 12.0
+                      ? "border-red-500/50 bg-red-500/20 text-red-300 animate-pulse"
+                      : "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                }`}
+                title={
+                  batteryVoltage !== null
+                    ? `Akü / Alternatör Voltajı: ${batteryVoltage}V (${batteryVoltage >= 13.5 ? "Şarj Ediyor" : batteryVoltage >= 12.2 ? "Akü Normal" : "Düşük Voltaj!"})`
+                    : "Akü Voltajı Okunuyor..."
+                }
+              >
+                <span>🔋</span>
+                <span>{batteryVoltage !== null ? `${batteryVoltage.toFixed(1)}V` : "--"}</span>
+              </div>
+
+              {/* Yüzen Mini Gösterge (Floating PiP) Butonu */}
+              <button
+                type="button"
+                onClick={() => setIsFloatingPipActive((prev) => !prev)}
+                className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider transition active:scale-95 ${
+                  isFloatingPipActive
+                    ? "border-primary bg-primary/25 text-primary shadow-[0_0_12px_var(--theme-glow)]"
+                    : "border-white/10 bg-white/5 text-muted hover:bg-white/10"
+                }`}
+                title="Navigasyon / Harita üzerinde yüzen mini kokpit penceresini aç/kapat"
+              >
+                <span>🫧</span>
+                <span>{isFloatingPipActive ? "MİNİ AÇIK" : "MİNİ PİP"}</span>
               </button>
 
               {/* GPS Durumu Rozeti */}
@@ -2443,6 +2558,156 @@ export default function Home() {
                     : "Samsung / Xiaomi / Huawei gibi cihazlarda arka planda kapanmayı önlemek için muafiyet tanımlayınız."}
                 </div>
               </div>
+
+              {/* Akü & Alternatör Şarj Voltajı Sağlığı */}
+              <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Akü / Alternatör Voltajı (ELM327 ATRV)
+                  </div>
+                  <span className="text-xs">⚡</span>
+                </div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-2xl font-bold text-main font-display tabular-nums">
+                    {batteryVoltage !== null ? batteryVoltage.toFixed(1) : "--"}
+                  </span>
+                  <span className="text-xs text-primary">VOLT</span>
+                </div>
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className={`h-full ${
+                      batteryVoltage !== null && batteryVoltage >= 13.5
+                        ? "bg-emerald-400"
+                        : batteryVoltage !== null && batteryVoltage >= 12.2
+                          ? "bg-amber-400"
+                          : "bg-red-500"
+                    }`}
+                    style={{
+                      width: `${Math.max(0, Math.min(100, (((batteryVoltage ?? 12) - 10) / 5) * 100))}%`,
+                    }}
+                  />
+                </div>
+                <div className="mt-1.5 text-xs">
+                  {batteryVoltage !== null ? (
+                    batteryVoltage >= 13.6 ? (
+                      <span className="text-emerald-400 font-semibold">✓ Alternatör şarj ediyor (Normal: 13.8V - 14.4V)</span>
+                    ) : batteryVoltage >= 12.4 ? (
+                      <span className="text-amber-300">ℹ️ Kontak açık, akü seviyesi normal (%80+)</span>
+                    ) : (
+                      <span className="text-red-400 font-bold">⚠️ Düşük voltaj! Akü veya şarj dinamosunu kontrol edin.</span>
+                    )
+                  ) : (
+                    <span className="text-muted">Voltaj ölçümü yapılıyor...</span>
+                  )}
+                </div>
+              </div>
+
+              {/* OBD-II DTC ARİZA TEŞHİS MERKEZİ (Mode 03 & Mode 04) */}
+              <div className="rounded-2xl border border-primary/30 bg-card p-4 shadow-xl sm:col-span-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🩺</span>
+                    <div>
+                      <div className="text-xs font-bold uppercase tracking-wider text-main font-display">
+                        ECU Arıza Teşhis & Kod Silme (DTC Engine)
+                      </div>
+                      <div className="text-[10px] text-muted">
+                        ISO 14230-4 KWP Fast • Mode 03 (Hata Oku) & Mode 04 (Check Engine Söndür)
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={scanDtc}
+                      disabled={isScanningDtc || isClearingDtc}
+                      className="flex items-center gap-1.5 rounded-xl border border-primary/40 bg-primary/20 px-3.5 py-2 text-xs font-bold text-primary shadow-[0_0_12px_var(--theme-glow)] transition hover:bg-primary/30 active:scale-95 disabled:opacity-50"
+                    >
+                      {isScanningDtc ? (
+                        <>
+                          <span className="h-3 w-3 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                          <span>Taranıyor...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>🔍</span>
+                          <span>Arıza Kodlarını Tara</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={clearDtc}
+                      disabled={isClearingDtc || isScanningDtc}
+                      className="flex items-center gap-1.5 rounded-xl border border-red-500/40 bg-red-500/15 px-3 py-2 text-xs font-bold text-red-300 transition hover:bg-red-500/25 active:scale-95 disabled:opacity-50"
+                      title="Arıza lambasını söndür ve ECU hafızasını sıfırla"
+                    >
+                      {isClearingDtc ? (
+                        <span>Siliniyor...</span>
+                      ) : (
+                        <>
+                          <span>🧹</span>
+                          <span>Kodları Sil / Lambayı Söndür</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Tarama Durum Bildirimi */}
+                {dtcScanMessage && (
+                  <div className="mt-3 rounded-xl border border-white/10 bg-black/40 px-3.5 py-2 text-xs text-muted flex items-center justify-between">
+                    <span>{dtcScanMessage}</span>
+                    {dtcCodes.length > 0 && (
+                      <span className="rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-bold text-red-300">
+                        {dtcCodes.length} HATA
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Taranan Arıza Kodları Listesi */}
+                <div className="mt-3 space-y-2">
+                  {dtcCodes.length > 0 ? (
+                    dtcCodes.map((item, idx) => (
+                      <div
+                        key={idx}
+                        className="flex flex-col gap-1.5 rounded-xl border border-red-500/30 bg-red-950/20 p-3 text-xs sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <span className="rounded-lg border border-red-500/40 bg-red-500/20 px-2 py-1 font-mono text-xs font-bold text-red-300">
+                            {item.code}
+                          </span>
+                          <div>
+                            <div className="font-bold text-main">{item.description}</div>
+                            <div className="text-[10px] text-muted">Sistem: {item.system} • Standart: SAE J1979</div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
+                              item.severity === "Kritik"
+                                ? "bg-red-500/30 text-red-200 border border-red-500/50"
+                                : item.severity === "Orta"
+                                  ? "bg-amber-500/30 text-amber-200 border border-amber-500/50"
+                                  : "bg-cyan-500/30 text-cyan-200 border border-cyan-500/50"
+                            }`}
+                          >
+                            {item.severity}
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  ) : !isScanningDtc && !dtcScanMessage ? (
+                    <div className="py-2 text-center text-xs text-muted">
+                      Aracınızın motor beynindeki (ECU) kayıtlı veya bekleyen arıza kodlarını okumak için &quot;Arıza Kodlarını Tara&quot; butonuna basınız.
+                    </div>
+                  ) : null}
+                </div>
+              </div>
             </div>
           )}
         </section>
@@ -2650,6 +2915,81 @@ export default function Home() {
           </motion.div>
         </div>
       ) : null}
+
+      {/* ========================================================================= */}
+      {/* YÜZEN MİNİ GÖSTERGE (FLOATING MINI PIP COCKPIT OVERLAY)                   */}
+      {/* ========================================================================= */}
+      {isFloatingPipActive && (
+        <motion.div
+          drag
+          dragMomentum={false}
+          initial={{ opacity: 0, scale: 0.8, y: 20 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.8 }}
+          className="fixed bottom-6 right-4 z-50 flex w-64 flex-col gap-2 rounded-3xl border border-primary/50 bg-[#07090ecf] p-3.5 shadow-[0_0_30px_var(--theme-glow)] backdrop-blur-xl touch-none select-none cursor-grab active:cursor-grabbing text-main"
+        >
+          {/* PiP Üst Başlık & Tutamaç */}
+          <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
+            <div className="flex items-center gap-1.5 text-[9px] font-extrabold uppercase tracking-widest text-primary font-display">
+              <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+              <span>AuraDrive Mini HUD</span>
+            </div>
+
+            <div className="flex items-center gap-1">
+              <span className="rounded-md border border-primary/40 bg-primary/20 px-1.5 py-0.5 text-[9px] font-bold text-primary">
+                VİTES {currentGear}
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsFloatingPipActive(false)}
+                className="flex h-5 w-5 items-center justify-center rounded-full bg-white/10 text-[10px] text-muted hover:bg-white/20 hover:text-white"
+                title="Mini göstergeyi kapat"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
+          {/* Ana Büyük Hız Göstergesi */}
+          <div className="py-1 text-center">
+            <div className="text-5xl font-light tracking-tight text-main font-display tabular-nums cluster-glow">
+              <SmoothNumber value={speed} digits={0} fast={true} />
+            </div>
+            <div className="text-[9px] font-bold uppercase tracking-[0.3em] text-primary font-display">
+              KM / SAAT
+            </div>
+          </div>
+
+          {/* Hızlı Bilgi Şeridi */}
+          <div className="grid grid-cols-3 gap-1.5 border-t border-white/10 pt-2 text-center">
+            <div className="rounded-xl border border-white/5 bg-black/40 p-1.5">
+              <div className="text-[8px] uppercase text-muted">Tüketim</div>
+              <div className="text-xs font-bold text-amber-300 font-display tabular-nums">
+                {fuel !== null ? fuel.toFixed(1) : "--"} <span className="text-[7px] text-muted">{fuelUnit}</span>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-white/5 bg-black/40 p-1.5">
+              <div className="text-[8px] uppercase text-muted">Turbo</div>
+              <div className="text-xs font-bold text-cyan-300 font-display tabular-nums">
+                {turboBoost !== null ? turboBoost.toFixed(2) : "--"} <span className="text-[7px] text-muted">Bar</span>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-white/5 bg-black/40 p-1.5">
+              <div className="text-[8px] uppercase text-muted">Akü</div>
+              <div className={`text-xs font-bold font-display tabular-nums ${batteryVoltage && batteryVoltage >= 13.5 ? "text-emerald-400" : "text-amber-400"}`}>
+                {batteryVoltage !== null ? `${batteryVoltage.toFixed(1)}V` : "--"}
+              </div>
+            </div>
+          </div>
+
+          {/* Taşıma İpucu */}
+          <div className="text-center text-[8px] text-muted opacity-60">
+            Ekranın istediğiniz köşesine sürükleyebilirsiniz ✥
+          </div>
+        </motion.div>
+      )}
     </main>
   );
 }

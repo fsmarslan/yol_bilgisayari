@@ -45,6 +45,7 @@ class BleTelemetryManager:
             "fuel_display": None,
             "fuel_unit": "--",
             "fuel_rate_lph": None,
+            "battery_voltage": None,
             "last_error": None,
             "updated_at": None,
         }
@@ -201,6 +202,7 @@ class BleTelemetryManager:
                 fuel_display=fuel_display,
                 fuel_unit=fuel_unit,
                 fuel_rate_lph=fuel_rate_lph,
+                battery_voltage=14.1,
                 updated_at=now_iso,
                 last_error=None,
             )
@@ -348,6 +350,7 @@ class BleTelemetryManager:
         coolant = current_state.get("coolant_temp_c")
         intake_temp = current_state.get("intake_temp_c")
         distance = current_state.get("distance_mil_on")
+        battery_voltage = current_state.get("battery_voltage")
 
         if should_poll_slow or coolant is None:
             poll_coolant = await self._query_pid(client, "0105", "05", self._parse_coolant)
@@ -361,6 +364,10 @@ class BleTelemetryManager:
             poll_dist = await self._query_pid(client, "0121", "21", self._parse_distance)
             if poll_dist is not None:
                 distance = poll_dist
+
+            poll_volt = await self._query_voltage(client)
+            if poll_volt is not None:
+                battery_voltage = poll_volt
 
             self._last_slow_poll_time = now_time
 
@@ -393,11 +400,25 @@ class BleTelemetryManager:
             fuel_display=fuel_display,
             fuel_unit=fuel_unit,
             fuel_rate_lph=fuel_rate_lph,
+            battery_voltage=battery_voltage,
             updated_at=now_iso,
             last_error=None,
         )
 
         return speed
+
+    async def _query_voltage(self, client: BleakClient) -> Optional[float]:
+        import re
+        raw = await self._send_command(client, "ATRV")
+        match = re.search(r"(\d+\.?\d*)\s*V?", raw, re.IGNORECASE)
+        if match:
+            try:
+                val = float(match.group(1))
+                if 5.0 <= val <= 18.0:
+                    return round(val, 1)
+            except ValueError:
+                pass
+        return None
 
     async def _query_pid(self, client: BleakClient, command: str, pid_hex: str, parser) -> Optional[float]:
         raw = await self._send_command(client, command)
