@@ -646,6 +646,37 @@ export default function Home() {
 
   // Yüzen Mini Gösterge (Floating Mini PiP) State'i
   const [isFloatingPipActive, setIsFloatingPipActive] = useState(false);
+  const [isInAndroidPip, setIsInAndroidPip] = useState(false);
+
+  // Android Yerel Picture-in-Picture Durum Dinleyicisi
+  useEffect(() => {
+    const handleAndroidPip = (e: any) => {
+      const inPip = !!e?.detail?.isInPip;
+      setIsInAndroidPip(inPip);
+      if (inPip) {
+        setIsFloatingPipActive(true);
+      }
+    };
+
+    window.addEventListener("androidPipChange", handleAndroidPip);
+    return () => {
+      window.removeEventListener("androidPipChange", handleAndroidPip);
+    };
+  }, []);
+
+  const togglePipMode = async () => {
+    if (isNative) {
+      const success = await backgroundService.enterPip();
+      if (success) {
+        setIsInAndroidPip(true);
+        setIsFloatingPipActive(true);
+        await backgroundService.setAutoPip(true);
+        return;
+      }
+    }
+    // Web ortamında veya PiP desteklenmiyorsa ekran içi yüzen pencere
+    setIsFloatingPipActive((prev) => !prev);
+  };
 
   // GPS Geolocation Takibi
   const [gpsActive, setGpsActive] = useState(false);
@@ -1355,6 +1386,59 @@ export default function Home() {
   const loadPercent = Math.max(0, Math.min(100, load ?? 0));
   const coolantPercent = Math.max(0, Math.min(100, (((coolant ?? 0) - 40) / 80) * 100));
 
+  // =========================================================================
+  // ANDROID YEREL PICTURE-IN-PICTURE (SİSTEM SEVİYESİ YÜZEN KOKPİT)
+  // Google Haritalar veya Ana Ekran üzerindeyken sadece dev hız ve vites görünür
+  // =========================================================================
+  if (isInAndroidPip) {
+    return (
+      <main
+        data-theme={theme}
+        className="flex h-screen w-screen flex-col items-center justify-between bg-black p-2 text-main select-none font-display overflow-hidden"
+      >
+        {/* Üst Mini Başlık ve Vites */}
+        <div className="flex w-full items-center justify-between px-1 text-[10px] font-bold">
+          <span className="text-primary tracking-widest text-[9px] uppercase">AuraDrive HUD</span>
+          <span className="rounded-md border border-primary/40 bg-primary/20 px-1.5 py-0.5 text-primary text-[10px]">
+            VİTES {currentGear}
+          </span>
+        </div>
+
+        {/* Ana Dev Hız Göstergesi */}
+        <div className="my-auto flex flex-col items-center justify-center text-center">
+          <div className="text-6xl font-light tracking-tight text-white tabular-nums cluster-glow">
+            <SmoothNumber value={speed} digits={0} fast={true} />
+          </div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.3em] text-primary">
+            KM / SAAT
+          </div>
+        </div>
+
+        {/* Alt Hızlı Bilgi Şeridi */}
+        <div className="flex w-full items-center justify-around border-t border-white/15 pt-1 text-center">
+          <div>
+            <div className="text-[8px] text-muted">YAKIT</div>
+            <div className="text-xs font-bold text-amber-300 tabular-nums">
+              {fuel !== null ? fuel.toFixed(1) : "--"} <span className="text-[7px] text-muted">{fuelUnit}</span>
+            </div>
+          </div>
+          <div>
+            <div className="text-[8px] text-muted">DEVİR</div>
+            <div className="text-xs font-bold text-cyan-300 tabular-nums">
+              {rpm ?? "--"} <span className="text-[7px] text-muted">D/D</span>
+            </div>
+          </div>
+          <div>
+            <div className="text-[8px] text-muted">AKÜ</div>
+            <div className={`text-xs font-bold tabular-nums ${batteryVoltage && batteryVoltage >= 13.5 ? "text-emerald-400" : "text-amber-400"}`}>
+              {batteryVoltage !== null ? `${batteryVoltage.toFixed(1)}V` : "--"}
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main
       data-theme={theme}
@@ -1490,16 +1574,16 @@ export default function Home() {
               {/* Yüzen Mini Gösterge (Floating PiP) Butonu */}
               <button
                 type="button"
-                onClick={() => setIsFloatingPipActive((prev) => !prev)}
+                onClick={() => void togglePipMode()}
                 className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[9px] font-bold tracking-wider transition active:scale-95 ${
-                  isFloatingPipActive
+                  isFloatingPipActive || isInAndroidPip
                     ? "border-primary bg-primary/25 text-primary shadow-[0_0_12px_var(--theme-glow)]"
                     : "border-white/10 bg-white/5 text-muted hover:bg-white/10"
                 }`}
-                title="Navigasyon / Harita üzerinde yüzen mini kokpit penceresini aç/kapat"
+                title="Android ana ekranı veya Google Haritalar üzerinde yüzen PiP mini kokpit penceresini aç"
               >
                 <span>🫧</span>
-                <span>{isFloatingPipActive ? "MİNİ AÇIK" : "MİNİ PİP"}</span>
+                <span>{isInAndroidPip || isFloatingPipActive ? "PİP AÇIK" : "MİNİ PİP"}</span>
               </button>
 
               {/* GPS Durumu Rozeti */}

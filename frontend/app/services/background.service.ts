@@ -13,6 +13,9 @@ export interface AuraBackgroundPluginInterface {
   isServiceRunning(): Promise<{ running: boolean }>;
   isIgnoringBatteryOptimizations(): Promise<{ ignoring: boolean }>;
   requestIgnoreBatteryOptimizations(): Promise<{ success: boolean }>;
+  enterPipMode(): Promise<{ success: boolean; error?: string }>;
+  isPipSupported(): Promise<{ supported: boolean }>;
+  setAutoPip(options: { enable: boolean }): Promise<{ autoPip: boolean }>;
 }
 
 const AuraBackground = registerPlugin<AuraBackgroundPluginInterface>("AuraBackground");
@@ -137,6 +140,36 @@ class BackgroundServiceManager {
       await AuraBackground.requestIgnoreBatteryOptimizations();
     } catch (err) {
       console.warn("[BackgroundService] Pil optimizasyon isteği hatası:", err);
+    }
+  }
+
+  public async enterPip(): Promise<boolean> {
+    if (!this.isNative) return false;
+    try {
+      const res = await AuraBackground.enterPipMode();
+      return res.success;
+    } catch (err) {
+      console.warn("[BackgroundService] enterPip hatası:", err);
+      return false;
+    }
+  }
+
+  public async setAutoPip(enable: boolean): Promise<void> {
+    if (!this.isNative) return;
+    try {
+      await AuraBackground.setAutoPip({ enable });
+    } catch {
+      // Ignore
+    }
+  }
+
+  public async isPipSupported(): Promise<boolean> {
+    if (!this.isNative) return false;
+    try {
+      const res = await AuraBackground.isPipSupported();
+      return res.supported;
+    } catch {
+      return false;
     }
   }
 }

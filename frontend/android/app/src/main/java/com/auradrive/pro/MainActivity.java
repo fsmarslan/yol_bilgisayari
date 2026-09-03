@@ -52,6 +52,32 @@ public class MainActivity extends BridgeActivity {
             }
         } catch (Exception ignored) {}
     }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, android.content.res.Configuration newConfig) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
+        try {
+            if (bridge != null && bridge.getWebView() != null) {
+                String script = "window.dispatchEvent(new CustomEvent('androidPipChange', { detail: { isInPip: " + isInPictureInPictureMode + " } }));";
+                bridge.getWebView().post(() -> bridge.getWebView().evaluateJavascript(script, null));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        try {
+            if (AuraBackgroundPlugin.autoPipOnLeave && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                if (getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+                    android.app.PictureInPictureParams.Builder builder = new android.app.PictureInPictureParams.Builder();
+                    android.util.Rational aspectRatio = new android.util.Rational(1, 1);
+                    builder.setAspectRatio(aspectRatio);
+                    enterPictureInPictureMode(builder.build());
+                }
+            }
+        } catch (Exception ignored) {}
+    }
 }
 
 

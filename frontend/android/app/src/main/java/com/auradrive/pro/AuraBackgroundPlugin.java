@@ -141,4 +141,56 @@ public class AuraBackgroundPlugin extends Plugin {
         ret.put("success", true);
         call.resolve(ret);
     }
+
+    public static boolean autoPipOnLeave = false;
+
+    @PluginMethod
+    public void isPipSupported(PluginCall call) {
+        boolean supported = false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            android.app.Activity activity = getActivity();
+            if (activity != null) {
+                supported = activity.getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE);
+            }
+        }
+        JSObject ret = new JSObject();
+        ret.put("supported", supported);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void enterPipMode(PluginCall call) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                android.app.Activity activity = getActivity();
+                if (activity != null && activity.getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+                    autoPipOnLeave = true;
+                    android.app.PictureInPictureParams.Builder builder = new android.app.PictureInPictureParams.Builder();
+                    // 1:1 kare mini HUD
+                    android.util.Rational aspectRatio = new android.util.Rational(1, 1);
+                    builder.setAspectRatio(aspectRatio);
+                    boolean entered = activity.enterPictureInPictureMode(builder.build());
+                    JSObject ret = new JSObject();
+                    ret.put("success", entered);
+                    call.resolve(ret);
+                    return;
+                }
+            }
+            JSObject ret = new JSObject();
+            ret.put("success", false);
+            ret.put("error", "PiP desteklenmiyor veya Android sürümü yetersiz");
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("PiP moduna gecilemedi: " + e.getMessage(), e);
+        }
+    }
+
+    @PluginMethod
+    public void setAutoPip(PluginCall call) {
+        boolean enable = call.getBoolean("enable", true);
+        autoPipOnLeave = enable;
+        JSObject ret = new JSObject();
+        ret.put("autoPip", autoPipOnLeave);
+        call.resolve(ret);
+    }
 }
