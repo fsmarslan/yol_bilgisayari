@@ -188,7 +188,8 @@ function estimateGear(speedKmh: number | null, rpm: number | null): string {
   if (ratio < 0.0185) return "2";
   if (ratio < 0.0270) return "3";
   if (ratio < 0.0360) return "4";
-  return "5";
+  if (ratio < 0.0460) return "5";
+  return "6";
 }
 
 function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -679,14 +680,16 @@ export default function Home() {
     setIsFloatingPipActive((prev) => !prev);
   };
 
-  // GPS Geolocation Takibi
+  // GPS Geolocation & Çift Kanallı Telemetri Takibi
   const [gpsActive, setGpsActive] = useState(false);
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [routePoints, setRoutePoints] = useState<GpsPoint[]>([]);
   const lastRecordedGpsRef = useRef<GpsPoint | null>(null);
   const currentSpeedRef = useRef<number>(0);
+  const lastObdUpdateTimestampRef = useRef<number>(0);
+  const avgFuelL100kmRef = useRef<number | null>(null);
 
-  // Anlık hızı ref üzerinden canlı güncelle (watchPosition döngüsünü sürekli yıkıp yeniden başlatmamak için)
+  // Anlık hızı ref üzerinden canlı güncelle
   useEffect(() => {
     currentSpeedRef.current = data?.speed_kmh ?? 0;
   }, [data?.speed_kmh]);
@@ -703,7 +706,7 @@ export default function Home() {
     }
   }, []);
 
-  // Canlı GPS Dinleyicisi (Tek sefer başlar, gereksiz GPU/Pil harcamaz)
+  // Canlı GPS Dinleyicisi (Tek sefer başlar, kesintisiz arka plan güzergahı & OBD yedeği)
   useEffect(() => {
     if (typeof window === "undefined" || !("geolocation" in navigator)) {
       return;
@@ -712,13 +715,21 @@ export default function Home() {
     const watchId = navigator.geolocation.watchPosition(
       (position) => {
         setGpsActive(true);
-        setGpsAccuracy(Math.round(position.coords.accuracy));
+        const accuracy = Math.round(position.coords.accuracy);
+        setGpsAccuracy(accuracy);
+
+        const gpsSpeedKmh =
+          position.coords.speed !== null && position.coords.speed >= 0
+            ? position.coords.speed * 3.6
+            : currentSpeedRef.current;
+
+        const now = Date.now();
         const newPoint: GpsPoint = {
           lat: position.coords.latitude,
           lng: position.coords.longitude,
-          speed: position.coords.speed !== null ? position.coords.speed * 3.6 : currentSpeedRef.current,
+          speed: gpsSpeedKmh,
           altitude: position.coords.altitude,
-          timestamp: position.timestamp || Date.now(),
+          timestamp: position.timestamp || now,
         };
 
         const last = lastRecordedGpsRef.current;
@@ -737,6 +748,54 @@ export default function Home() {
         if (shouldRecord) {
           lastRecordedGpsRef.current = newPoint;
           setRoutePoints((prev) => [...prev, newPoint]);
+        }
+
+        // KESİNTİSİZ ÇİFT KANALLI YOL BİLGİSAYARI (OBD + GPS DUAL TELEMETRY)
+        // Eğer OBD bağlı değilse veya son 3.5 saniyedir Bluetooth'tan hız akmıyorsa
+        // (örneğin A2DP müzik akışı sırasında veya OBD yeniden bağlanırken),
+        // kat edilen mesafe ve tüketim GPS üzerinden KESİNTİSİZ kaydedilir!
+        const isObdStreaming = now - lastObdUpdateTimestampRef.current < 3500;
+
+        if (!isObdStreaming && last) {
+          const gpsDistM = calculateDistanceMeters(last.lat, last.lng, newPoint.lat, newPoint.lng);
+          const timeDiffSec = Math.max(0.5, (newPoint.timestamp - last.timestamp) / 1000);
+
+          // Makul GPS hareket filtresi (5 metre - 5 km arası, zaman farkı 60 sn'den az)
+          if (gpsDistM >= 5 && gpsDistM <= 5000 && timeDiffSec <= 60 && accuracy <= 50) {
+            const gpsDistKm = gpsDistM / 1000;
+            const fallbackConsumption =
+              avgFuelL100kmRef.current && avgFuelL100kmRef.current > 0
+                ? avgFuelL100kmRef.current
+                : 5.5; // 1.4 D-4D nominal ortalama (5.5 L/100km)
+            const estimatedFuel = (gpsDistKm * fallbackConsumption) / 100;
+            const deltaMovingMs = gpsSpeedKmh > 2.0 ? timeDiffSec * 1000 : 0;
+
+            if (gpsDistKm > 0.005) {
+              isTripArchivedRef.current = false;
+            }
+
+            setTrip((prev) => {
+              const updated: TripData = {
+                distanceKm: prev.distanceKm + gpsDistKm,
+                fuelLiters: prev.fuelLiters + estimatedFuel,
+                durationMs: prev.durationMs + timeDiffSec * 1000,
+                movingDurationMs: prev.movingDurationMs + deltaMovingMs,
+                maxSpeed: Math.max(prev.maxSpeed, gpsSpeedKmh),
+                startTime: prev.startTime || now - prev.durationMs,
+              };
+
+              if (now - lastStorageSaveRef.current > 2000) {
+                lastStorageSaveRef.current = now;
+                try {
+                  localStorage.setItem(STORAGE_KEY_TRIP, JSON.stringify(updated));
+                } catch {
+                  // Ignore
+                }
+              }
+
+              return updated;
+            });
+          }
         }
       },
       (err) => {
@@ -818,6 +877,8 @@ export default function Home() {
     }
 
     const now = Date.now();
+    lastObdUpdateTimestampRef.current = now;
+
     if (lastUpdateRef.current === null) {
       lastUpdateRef.current = now;
       return;
@@ -826,14 +887,17 @@ export default function Home() {
     const deltaSeconds = (now - lastUpdateRef.current) / 1000;
     lastUpdateRef.current = now;
 
-    // Arka planda navigasyon açıkken veya ekran kilitliyken Android WebView timer gecikmelerini tolere et (12 sn)
-    // Gerçek kopma durumlarında (12 sn üzeri) devasa boşluk atlanır
-    if (deltaSeconds <= 0 || deltaSeconds > 12.0) {
+    // Negatif veya sıfır zaman atlanır
+    if (deltaSeconds <= 0) {
       return;
     }
 
+    // Arka planda navigasyon açıkken veya ekran kilitliyken Android WebView timer gecikmelerini tolere et
+    // 25 saniyeye kadar olan tüm arka plan paketleri KESİNTİSİZ entegre edilir (çöpe atılmaz!)
+    const effectiveDelta = Math.min(deltaSeconds, 25.0);
+
     const speed = Number.isFinite(data.speed_kmh) ? Math.max(0, data.speed_kmh!) : 0;
-    const deltaDistanceKm = (speed * deltaSeconds) / 3600;
+    const deltaDistanceKm = (speed * effectiveDelta) / 3600;
 
     let rawFuelRate = data.fuel_rate_lph;
     if (rawFuelRate === undefined || rawFuelRate === null) {
@@ -847,8 +911,8 @@ export default function Home() {
     }
 
     const validFuelRate = Number.isFinite(rawFuelRate) ? Math.max(0, rawFuelRate!) : 0;
-    const deltaFuelLiters = (validFuelRate * deltaSeconds) / 3600;
-    const deltaDurationMs = deltaSeconds * 1000;
+    const deltaFuelLiters = (validFuelRate * effectiveDelta) / 3600;
+    const deltaDurationMs = effectiveDelta * 1000;
     const deltaMovingMs = speed > 1.5 ? deltaDurationMs : 0;
 
     if (deltaDistanceKm > 0.005 || deltaFuelLiters > 0.001) {
@@ -862,7 +926,7 @@ export default function Home() {
         durationMs: prev.durationMs + deltaDurationMs,
         movingDurationMs: prev.movingDurationMs + deltaMovingMs,
         maxSpeed: Math.max(prev.maxSpeed, speed),
-        startTime: prev.startTime || now,
+        startTime: prev.startTime || now - prev.durationMs,
       };
 
       // Arka planda CPU ve depolamayı yormamak için diske 2 saniyede bir yaz (batarya & navigasyon akıcılığı)
@@ -1064,7 +1128,21 @@ export default function Home() {
   const coolant = data?.coolant_temp_c ?? null;
   const load = data?.load_percent ?? null;
   const intakeTemp = data?.intake_temp_c ?? null;
-  const throttle = data?.throttle_percent ?? null;
+  // Dizel common-rail motorlarda gaz pedalı (PID 0111 sabit %2.4 kelebek konumu yerine dinamik gaz pedalı basma tepkisi)
+  const throttle = useMemo(() => {
+    if (data?.throttle_percent !== null && data?.throttle_percent !== undefined) {
+      if (data.throttle_percent >= 2.0 && data.throttle_percent <= 2.8 && load !== null) {
+        const idleBase = 14.0;
+        return Math.max(0, Math.min(100, Math.round(((load - idleBase) / (100.0 - idleBase)) * 100.0)));
+      }
+      return data.throttle_percent;
+    }
+    if (load !== null) {
+      const idleBase = 14.0;
+      return Math.max(0, Math.min(100, Math.round(((load - idleBase) / (100.0 - idleBase)) * 100.0)));
+    }
+    return null;
+  }, [data?.throttle_percent, load]);
   const map = data?.map_kpa ?? null;
   const fuel = data?.fuel_display ?? null;
   const fuelUnit = data?.fuel_unit ?? "--";
@@ -1169,6 +1247,10 @@ export default function Home() {
     return null;
   }, [trip.distanceKm, trip.fuelLiters]);
 
+  useEffect(() => {
+    avgFuelL100kmRef.current = avgFuelL100km;
+  }, [avgFuelL100km]);
+
   const avgSpeedKmh = useMemo(() => {
     if (trip.durationMs > 2000 && trip.distanceKm > 0) {
       const hours = trip.durationMs / 3600000;
@@ -1180,6 +1262,14 @@ export default function Home() {
   const tripTotalCostTL = useMemo(() => {
     return trip.fuelLiters * fuelPrice;
   }, [trip.fuelLiters, fuelPrice]);
+
+  // Trip ortalama tüketimine göre km başına maliyet (₺/km): (Ort. Tüketim * Yakıt Fiyatı) / 100
+  const tripCostTLPerKm = useMemo(() => {
+    if (avgFuelL100km !== null && avgFuelL100km > 0 && fuelPrice > 0) {
+      return (avgFuelL100km * fuelPrice) / 100;
+    }
+    return null;
+  }, [avgFuelL100km, fuelPrice]);
 
   const instantCostTLPerKm = useMemo(() => {
     if (fuelUnit === "L/100km" && fuel !== null && fuel > 0) {
@@ -1326,13 +1416,13 @@ export default function Home() {
     }
   }, [isNative]);
 
-  // Bağlantı kurulduğunda veya demo modunda Arka Plan Servisini otomatik başlat
+  // Arka Plan Servisini Başlat / Yönet
   useEffect(() => {
-    if (bgServiceEnabled && (data?.connected || demoMode)) {
+    if (bgServiceEnabled) {
       void backgroundService
         .start(
-          "AuraDrive Pro — Sürüş Aktif ⚡",
-          "Telemetri ve yol bilgisayarı arka planda çalışıyor..."
+          "AuraDrive Pro — Sürüş & Yol Bilgisayarı ⚡",
+          "Arka planda kesintisiz telemetri, km ve yakıt kaydı aktif..."
         )
         .then((active) => {
           setBgServiceActive(active);
@@ -1342,36 +1432,48 @@ export default function Home() {
         setBgServiceActive(false);
       });
     }
-  }, [data?.connected, demoMode, bgServiceEnabled, bgServiceActive]);
+  }, [bgServiceEnabled, bgServiceActive]);
 
-  // Arka Plan Bildirimini Canlı Sürüş Verileriyle Güncelle
+  // Arka Plan Bildirimini Canlı Sürüş Verileriyle Kesintisiz Güncelle
   useEffect(() => {
-    if (!bgServiceActive || (!data?.connected && !demoMode)) return;
+    if (!bgServiceActive) return;
 
-    const speed = Math.round(data?.speed_kmh ?? 0);
+    const currentSpeed = Math.round(
+      data?.speed_kmh !== null && data?.speed_kmh !== undefined
+        ? data.speed_kmh
+        : (currentSpeedRef.current ?? 0)
+    );
+
     const fuelStr =
       data?.fuel_display !== null && data?.fuel_display !== undefined
         ? `${data.fuel_display.toFixed(1)} ${data.fuel_unit}`
-        : "--";
+        : (avgFuelL100km !== null ? `Ort: ${avgFuelL100km.toFixed(1)} L` : "--");
+
     const distStr = `${trip.distanceKm.toFixed(1)} km`;
     const durationStr = formatTrip(trip.durationMs);
     const costStr =
-      trip.fuelLiters > 0 ? ` • ${(trip.fuelLiters * fuelPrice).toFixed(1)} ₺` : "";
+      tripTotalCostTL > 0 ? ` • ${tripTotalCostTL.toFixed(1)} ₺` : "";
+    const kmCostStr =
+      tripCostTLPerKm !== null ? ` • ${tripCostTLPerKm.toFixed(2)} ₺/km` : "";
+    const sourceBadge = data?.connected ? "🚗 OBD" : gpsActive ? "🛰️ GPS" : "🅿️ Bekliyor";
 
-    const title = `AuraDrive Pro — ${speed} km/h ${speed > 0 ? "🚗" : "🅿️"}`;
-    const body = `⛽ ${fuelStr} • 📍 ${distStr} • ⏱️ ${durationStr}${costStr}`;
+    const title = `AuraDrive Pro — ${currentSpeed} km/h • ${sourceBadge}`;
+    const body = `📍 ${distStr} • ⛽ ${fuelStr} • ⏱️ ${durationStr}${costStr}${kmCostStr}`;
 
-    void backgroundService.updateNotification(title, body);
+    void backgroundService.updateNotification(title, body, 1500);
   }, [
     bgServiceActive,
     data?.speed_kmh,
     data?.fuel_display,
     data?.fuel_unit,
+    data?.connected,
+    gpsActive,
     trip.distanceKm,
     trip.durationMs,
-    trip.fuelLiters,
+    tripTotalCostTL,
+    tripCostTLPerKm,
+    avgFuelL100km,
     fuelPrice,
-    data?.connected,
     demoMode,
   ]);
 
@@ -2010,6 +2112,11 @@ export default function Home() {
                 <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
                   <SmoothNumber value={avgFuelL100km} digits={2} /> <span className="text-xs text-primary">L/100km</span>
                 </div>
+                {tripCostTLPerKm !== null && (
+                  <div className="mt-0.5 text-[10px] font-semibold text-emerald-400 tabular-nums">
+                    ≈ {tripCostTLPerKm.toFixed(2)} ₺/km
+                  </div>
+                )}
               </div>
 
               <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
@@ -2078,7 +2185,7 @@ export default function Home() {
               {/* 1. GÜNCEL SÜRÜŞ GÖRÜNÜMÜ */}
               {tripSubView === "current" && (
                 <div className="flex flex-col gap-3">
-                  <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                  <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-2 md:grid-cols-5">
                     <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
                       <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
                         Kat Edilen Yol
@@ -2106,6 +2213,21 @@ export default function Home() {
                       </div>
                     </div>
 
+                    <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 flex items-center justify-between">
+                        <span>KM Başı Maliyet</span>
+                        <span className="text-xs">⚡</span>
+                      </div>
+                      <div className="mt-1 text-2xl font-bold text-emerald-400 font-display tabular-nums">
+                        <SmoothNumber value={tripCostTLPerKm} digits={2} /> <span className="text-xs text-emerald-500">₺/KM</span>
+                      </div>
+                      <div className="mt-0.5 text-[9px] text-muted truncate">
+                        {avgFuelL100km !== null && fuelPrice > 0
+                          ? `${avgFuelL100km.toFixed(1)} L @ ${fuelPrice.toFixed(2)} ₺`
+                          : "Ort. tüketime göre"}
+                      </div>
+                    </div>
+
                     <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
                       <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
                         Ortalama Tüketim
@@ -2113,6 +2235,11 @@ export default function Home() {
                       <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
                         <SmoothNumber value={avgFuelL100km} digits={2} /> <span className="text-xs text-primary">L/100km</span>
                       </div>
+                      {tripCostTLPerKm !== null && (
+                        <div className="mt-0.5 text-[9px] font-medium text-emerald-400 tabular-nums">
+                          ≈ {tripCostTLPerKm.toFixed(2)} ₺ / km
+                        </div>
+                      )}
                     </div>
 
                     <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
@@ -2148,6 +2275,15 @@ export default function Home() {
                       </div>
                       <div className="mt-1 text-xl font-bold text-main font-display tabular-nums">
                         {formatTrip(trip.movingDurationMs)}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Rölanti / Duraklama
+                      </div>
+                      <div className="mt-1 text-xl font-bold text-main font-display tabular-nums">
+                        {formatTrip(Math.max(0, trip.durationMs - trip.movingDurationMs))}
                       </div>
                     </div>
                   </div>
@@ -2245,6 +2381,14 @@ export default function Home() {
                           <div className="text-xl font-bold text-emerald-400 font-display">
                             {tripHistory.reduce((acc, t) => acc + t.fuelCostTL, 0).toFixed(2)} ₺
                           </div>
+                          {tripHistory.reduce((acc, t) => acc + t.distanceKm, 0) > 0 && (
+                            <div className="text-[9px] font-semibold text-emerald-400/80">
+                              Ort. {(
+                                tripHistory.reduce((acc, t) => acc + t.fuelCostTL, 0) /
+                                tripHistory.reduce((acc, t) => acc + t.distanceKm, 0)
+                              ).toFixed(2)} ₺/km
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -2323,6 +2467,11 @@ export default function Home() {
                                 <div className="text-sm font-bold text-main font-display">
                                   {hTrip.avgFuelL100km ? `${hTrip.avgFuelL100km.toFixed(1)} L` : "--"}
                                 </div>
+                                {hTrip.distanceKm >= 0.05 && hTrip.fuelCostTL > 0 && (
+                                  <div className="text-[9px] font-bold text-emerald-400">
+                                    {(hTrip.fuelCostTL / hTrip.distanceKm).toFixed(2)} ₺/km
+                                  </div>
+                                )}
                               </div>
                               <div className="rounded-xl border border-white/5 bg-black/30 p-2">
                                 <div className="text-[9px] text-muted uppercase">Maks Hız</div>
@@ -2543,10 +2692,13 @@ export default function Home() {
 
               <div className="rounded-2xl border border-white/10 bg-black/40 p-3.5">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                  Gaz Pedalı Açısı
+                  Gaz Pedalı / Tork Talebi
                 </div>
                 <div className="mt-1 text-2xl font-bold text-main font-display tabular-nums">
-                  <SmoothNumber value={throttle} digits={1} /> <span className="text-xs text-primary">%</span>
+                  <SmoothNumber value={throttle} digits={0} /> <span className="text-xs text-primary">%</span>
+                </div>
+                <div className="mt-0.5 text-[9px] text-muted">
+                  {throttle !== null && throttle > 0 ? "Pedal basılı" : "Rölanti / Bırakıldı"}
                 </div>
               </div>
             </div>
@@ -2900,6 +3052,14 @@ export default function Home() {
                   </span>
                 </div>
                 <div className="flex justify-between py-0.5">
+                  <span>
+                    1 km Maliyet (Ort. {avgFuelL100km ? avgFuelL100km.toFixed(1) : "5.0"} L):
+                  </span>
+                  <span className="font-bold text-emerald-400 tabular-nums">
+                    {(((parseFloat(fuelPriceInput) || fuelPrice) * (avgFuelL100km || 5.0)) / 100).toFixed(2)} ₺/km
+                  </span>
+                </div>
+                <div className="flex justify-between py-0.5">
                   <span>Tam Depo (55 L):</span>
                   <span className="font-bold text-main tabular-nums">
                     {((parseFloat(fuelPriceInput) || fuelPrice) * 55).toFixed(2)} ₺
@@ -2989,6 +3149,11 @@ export default function Home() {
                 <div className="font-bold text-amber-300 font-display">
                   {selectedMapTrip.avgFuelL100km ? `${selectedMapTrip.avgFuelL100km.toFixed(1)} L` : "--"}
                 </div>
+                {selectedMapTrip.distanceKm >= 0.05 && selectedMapTrip.fuelCostTL > 0 && (
+                  <div className="text-[9px] font-bold text-emerald-400">
+                    {(selectedMapTrip.fuelCostTL / selectedMapTrip.distanceKm).toFixed(2)} ₺/km
+                  </div>
+                )}
               </div>
               <div className="rounded-xl border border-white/5 bg-black/40 p-2">
                 <div className="text-[9px] text-muted uppercase">Süre</div>

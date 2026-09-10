@@ -29,6 +29,10 @@ class BackgroundServiceManager {
   private latestTitle: string = "";
   private latestBody: string = "";
 
+  private audioCtx: any = null;
+  private oscillator: any = null;
+  private gainNode: any = null;
+
   private constructor() {
     this.isNative = typeof window !== "undefined" && Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android";
   }
@@ -40,7 +44,62 @@ class BackgroundServiceManager {
     return BackgroundServiceManager.instance;
   }
 
+  /**
+   * Android Chromium WebView'in arka plandayken JavaScript zamanlayıcılarını (setTimeout/setInterval)
+   * ve BLE/GPS döngülerini uyutmasını/kısıtlamasını engelleyen inaudible (duyulmaz) keep-alive mekanizması.
+   * Kullanıcının Spotify / Navigasyon dinlemesini ASLA bozmaz (ses seviyesi 0.00001).
+   */
+  public startKeepAlive() {
+    if (typeof window === "undefined") return;
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      if (!this.audioCtx) {
+        this.audioCtx = new AudioCtx();
+      }
+      if (this.audioCtx.state === "suspended") {
+        void this.audioCtx.resume();
+      }
+      if (!this.oscillator && this.audioCtx) {
+        this.oscillator = this.audioCtx.createOscillator();
+        this.gainNode = this.audioCtx.createGain();
+        this.gainNode.gain.setValueAtTime(0.00001, this.audioCtx.currentTime);
+        this.oscillator.type = "sine";
+        this.oscillator.frequency.setValueAtTime(220, this.audioCtx.currentTime);
+        this.oscillator.connect(this.gainNode);
+        this.gainNode.connect(this.audioCtx.destination);
+        this.oscillator.start();
+        console.log("[BackgroundService] WebView arka plan zamanlayıcı koruması aktif 🛡️");
+      }
+    } catch (e) {
+      console.warn("[BackgroundService] Keep-alive sesi başlatılamadı:", e);
+    }
+  }
+
+  public stopKeepAlive() {
+    try {
+      if (this.oscillator) {
+        this.oscillator.stop();
+        this.oscillator.disconnect();
+        this.oscillator = null;
+      }
+      if (this.gainNode) {
+        this.gainNode.disconnect();
+        this.gainNode = null;
+      }
+      if (this.audioCtx) {
+        void this.audioCtx.close();
+        this.audioCtx = null;
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
   public async start(title = "AuraDrive Pro — Sürüş Aktif ⚡", body = "Telemetri ve yol bilgisayarı arka planda çalışıyor..."): Promise<boolean> {
+    this.startKeepAlive();
+
     if (!this.isNative) {
       console.log("[BackgroundService] Web ortamında arka plan simüle edildi");
       this.isRunning = true;
@@ -90,6 +149,8 @@ class BackgroundServiceManager {
   }
 
   public async stop(): Promise<boolean> {
+    this.stopKeepAlive();
+
     if (this.pendingUpdateTimeout) {
       clearTimeout(this.pendingUpdateTimeout);
       this.pendingUpdateTimeout = null;

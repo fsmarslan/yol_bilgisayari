@@ -128,24 +128,7 @@ export class MobileObdBleService {
   private listeners: Array<(state: TelemetryState) => void> = [];
 
   private constructor() {
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible") {
-          const now = Date.now();
-          if (
-            this.isRunning &&
-            (!this.state.connected || (this.lastSuccessTimestamp > 0 && now - this.lastSuccessTimestamp > 4000))
-          ) {
-            console.log("[MobileObdBleService] Uygulama ön plana geldi, veri akışı kontrol ediliyor...");
-            if (this.connectedDeviceId) {
-              BleClient.disconnect(this.connectedDeviceId).catch(() => {});
-            }
-            this.state.connected = false;
-            this.notifyListeners();
-          }
-        }
-      });
-    }
+    // Boş yapıcı — Arka plandan ön plana dönüşte çalışan aktif bağlantıyı ASLA zorla koparma
   }
 
   public static getInstance(): MobileObdBleService {
@@ -250,14 +233,14 @@ export class MobileObdBleService {
         const savedId = this.getSavedDeviceId();
 
         // 1. Önce kayıtlı cihaza doğrudan bağlanmayı dene (BLE Scan yapmadan -> Araç multimedya/müzik akışını bozmaz)
-        if (savedId && this.directConnectAttempts < 2) {
+        if (savedId && this.directConnectAttempts < 5) {
           device = {
             deviceId: savedId,
             name: this.getSavedDeviceName() || "OBD-II (Kayıtlı)",
           };
           this.directConnectAttempts++;
         } else {
-          // 2. Kayıtlı cihaz yoksa veya doğrudan bağlantı başarısız olduysa tarama yap
+          // 2. Kayıtlı cihaz yoksa veya 5 doğrudan deneme sonuçsuz kaldıysa tarama yap
           device = await this.scanForObd();
           this.directConnectAttempts = 0;
         }
@@ -277,7 +260,7 @@ export class MobileObdBleService {
 
         if (!this.isRunning) break;
         await new Promise((r) => setTimeout(r, reconnectDelay));
-        reconnectDelay = Math.min(reconnectDelay * 1.4, 4000);
+        reconnectDelay = Math.min(reconnectDelay * 1.3, 3500);
       }
     }
   }
@@ -286,18 +269,40 @@ export class MobileObdBleService {
     let targetDevice: BleDevice | null = null;
 
     try {
-      await BleClient.requestLEScan({}, (result) => {
-        const name = (result.device.name || result.localName || "").toUpperCase();
-        if (OBD_NAME_HINTS.some((hint) => name.includes(hint))) {
-          targetDevice = result.device;
-          BleClient.stopLEScan().catch(() => {});
-        }
-      });
+      await BleClient.requestLEScan(
+        {
+          services: [
+            DEFAULT_SERVICE_UUID,
+            "0000ffe0-0000-1000-8000-00805f9b34fb",
+            "000018f0-0000-1000-8000-00805f9b34fb",
+          ],
+        },
+        (result) => {
+          const name = (result.device.name || result.localName || "").toUpperCase();
+          if (OBD_NAME_HINTS.some((hint) => name.includes(hint)) || name.length > 0) {
+            targetDevice = result.device;
+            BleClient.stopLEScan().catch(() => {});
+          }
+        },
+      );
 
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise((r) => setTimeout(r, 2500));
       await BleClient.stopLEScan().catch(() => {});
     } catch {
-      // Scan error
+      try {
+        await BleClient.requestLEScan({}, (result) => {
+          const name = (result.device.name || result.localName || "").toUpperCase();
+          if (OBD_NAME_HINTS.some((hint) => name.includes(hint))) {
+            targetDevice = result.device;
+            BleClient.stopLEScan().catch(() => {});
+          }
+        });
+
+        await new Promise((r) => setTimeout(r, 2500));
+        await BleClient.stopLEScan().catch(() => {});
+      } catch {
+        // Scan error
+      }
     }
 
     return targetDevice;
@@ -381,13 +386,13 @@ export class MobileObdBleService {
       subTick = (subTick + 1) % 6;
 
       // Bluetooth bandını rahatlatma payı (A2DP müzik akışının ve navigasyonun tıkanmasını engeller)
-      await new Promise((r) => setTimeout(r, 24));
+      await new Promise((r) => setTimeout(r, 35));
 
-      // Sağlık ve Kilitlenme Kontrolü (Watchdog)
+      // Sağlık ve Kilitlenme Kontrolü (Watchdog) - Arka plan ve Bluetooth müzik akışını tolere eder (18 sn)
       const now = Date.now();
       if (
-        this.consecutiveErrors >= 7 ||
-        (this.lastSuccessTimestamp > 0 && now - this.lastSuccessTimestamp > 4500)
+        this.consecutiveErrors >= 14 ||
+        (this.lastSuccessTimestamp > 0 && now - this.lastSuccessTimestamp > 18000)
       ) {
         console.warn("[MobileObdBleService] Veri akışı kesildi veya Bluetooth yanıt vermiyor, yeniden bağlanılıyor...");
         this.state.connected = false;
@@ -438,7 +443,7 @@ export class MobileObdBleService {
     }
   }
 
-  private sendCommand(deviceId: string, command: string, timeoutMs = 400): Promise<string> {
+  private sendCommand(deviceId: string, command: string, timeoutMs = 1200): Promise<string> {
     return new Promise(async (resolve) => {
       this.notifyBuffer = "";
       let isDone = false;
@@ -538,9 +543,17 @@ export class MobileObdBleService {
       }
       case 2: {
         const load = await this.queryPid(deviceId, "0104", "04", this.parseLoad);
-        if (load !== null) this.state.load_percent = load;
-        const throttle = await this.queryPid(deviceId, "0111", "11", this.parseThrottle);
-        if (throttle !== null) this.state.throttle_percent = throttle;
+        if (load !== null) {
+          this.state.load_percent = load;
+          // Toyota 1.4 D-4D gibi dizel araçlarda gaz kelebeği bulunmaz (PID 0111 sabit %2.4 kalır).
+          // Gaz pedalı doğrudan motor yükünü ve enjektör debisini yönetir.
+          // Rölanti baz yükü (~%14) düşülerek dinamik gerçek gaz pedalı basma yüzdesi (%0 - %100) hesaplanır:
+          const idleBase = 14.0;
+          this.state.throttle_percent = Math.max(
+            0,
+            Math.min(100, Math.round(((load - idleBase) / (100.0 - idleBase)) * 100.0)),
+          );
+        }
         break;
       }
       case 5: {
@@ -697,9 +710,9 @@ export class MobileObdBleService {
     // 1. Kompresyonda Gaz Kesme (Deceleration Fuel Cut-off)
     let isCoasting = false;
     if (rpm !== null && rpm > 1150) {
-      if (throttlePercent !== null && throttlePercent < 2.0) {
+      if (throttlePercent !== null && throttlePercent <= 2.0) {
         isCoasting = true;
-      } else if (loadPercent !== null && loadPercent < 8.0) {
+      } else if (loadPercent !== null && loadPercent <= 14.0) {
         isCoasting = true;
       }
     }
