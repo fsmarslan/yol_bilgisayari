@@ -184,12 +184,16 @@ function formatTimestamp(value: string | null) {
 function estimateGear(speedKmh: number | null, rpm: number | null): string {
   if (!speedKmh || !rpm || speedKmh < 3 || rpm < 600) return "N";
   const ratio = speedKmh / rpm;
-  if (ratio < 0.0112) return "1";
-  if (ratio < 0.0185) return "2";
-  if (ratio < 0.0270) return "3";
-  if (ratio < 0.0360) return "4";
-  if (ratio < 0.0460) return "5";
-  return "6";
+  // 2006 Toyota Corolla 1.4 D-4D (E120) 5 İleri 1 Geri Manuel Şanzıman (C50 / C54A)
+  // Gerçek Dişli Oranları (km/h per RPM):
+  // 1: ~0.0088 | 2: ~0.0164 | 3: ~0.0253 | 4: ~0.0352 | 5: ~0.0430
+  if (ratio < 0.0055) return "N";
+  if (ratio < 0.0125) return "1";
+  if (ratio < 0.0205) return "2";
+  if (ratio < 0.0300) return "3";
+  if (ratio < 0.0390) return "4";
+  if (ratio <= 0.0520) return "5";
+  return "N"; // 5. vitesten yüksek oranlar (ör. boşta süzülme / debriyaj basılı)
 }
 
 function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -1318,16 +1322,24 @@ export default function Home() {
       };
     }
 
-    if (rpm !== null && rpm >= 2200 && (load ?? 0) > 25 && (speed ?? 0) > 20) {
+    if (
+      currentGear !== "5" &&
+      currentGear !== "N" &&
+      rpm !== null &&
+      rpm >= 2200 &&
+      (load ?? 0) > 25 &&
+      (speed ?? 0) > 20
+    ) {
+      const nextGear = Number(currentGear) + 1;
       return {
         type: "info",
-        title: "VİTES YÜKSELT (SHIFT UP)",
-        text: "Maksimum yakıt tasarrufu ve tork için bir üst vitese geçin.",
+        title: `VİTES YÜKSELT (${nextGear}. VİTES)`,
+        text: `Maksimum yakıt tasarrufu ve ideal tork için ${nextGear}. vitese geçin.`,
       };
     }
 
     return null;
-  }, [data?.connected, coolant, rpm, load, speed]);
+  }, [data?.connected, coolant, rpm, load, speed, currentGear]);
 
   // ----------------------------------------------------
   // WAKE LOCK
