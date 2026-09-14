@@ -28,6 +28,6 @@ SLOW_PID_INTERVAL_SECONDS = float(os.getenv("BLE_SLOW_PID_INTERVAL", "5.0"))
 
 # Toyota 1.4 D-4D (1ND-TV) Dizel Motor ve Yakıt Parametreleri
 DIESEL_DENSITY_G_PER_L = float(os.getenv("DIESEL_DENSITY", "840.0"))  # Euro Diesel yoğunluğu ~840 g/L
-MIN_DIESEL_AFR = float(os.getenv("MIN_DIESEL_AFR", "18.0"))          # Tam gaz / yüksek yük
+MIN_DIESEL_AFR = float(os.getenv("MIN_DIESEL_AFR", "17.5"))          # Tam gaz / yüksek yük (1ND-TV tam güç duman sınırı)
 MAX_DIESEL_AFR = float(os.getenv("MAX_DIESEL_AFR", "65.0"))          # Rölanti / düşük yük
 CRUISE_DEFAULT_AFR = float(os.getenv("CRUISE_DEFAULT_AFR", "32.0"))  # Yük bilgisi yoksa varsayılan

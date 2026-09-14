@@ -344,6 +344,11 @@ class BleTelemetryManager:
         maf = await self._query_pid(client, "0110", "10", self._parse_maf)
         load = await self._query_pid(client, "0104", "04", self._parse_load)
         throttle = await self._query_pid(client, "0111", "11", self._parse_throttle)
+        if throttle is not None and 2.0 <= throttle <= 2.8 and load is not None:
+            # Toyota 1.4 D-4D dizel araçta kelebek sabit %2.4 kalır.
+            # Rölanti baz yükü (~%14) düşülerek dinamik gerçek gaz pedalı basma yüzdesi (%0 - %100) hesaplanır:
+            idle_base = 14.0
+            throttle = max(0.0, min(100.0, round(((load - idle_base) / (100.0 - idle_base)) * 100.0, 1)))
 
         # 2. DUSUK FREKANSLI PID'LER (Periyodik olarak okunur - Sıcaklıklar, Mesafe)
         current_state = await self.snapshot()
@@ -558,9 +563,9 @@ class BleTelemetryManager:
         # Devir rölanti üstündeyken gaz pedalı bırakılmışsa enjektörler tamamen kapatılır.
         is_coasting = False
         if rpm is not None and rpm > 1150:
-            if throttle_percent is not None and throttle_percent < 2.0:
+            if throttle_percent is not None and throttle_percent <= 2.0:
                 is_coasting = True
-            elif load_percent is not None and load_percent < 8.0:
+            elif load_percent is not None and load_percent <= 14.0:
                 is_coasting = True
 
         if is_coasting and speed_kmh > 15.0:

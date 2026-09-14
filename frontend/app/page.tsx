@@ -689,6 +689,7 @@ export default function Home() {
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [routePoints, setRoutePoints] = useState<GpsPoint[]>([]);
   const lastRecordedGpsRef = useRef<GpsPoint | null>(null);
+  const lastGpsDistancePointRef = useRef<GpsPoint | null>(null);
   const currentSpeedRef = useRef<number>(0);
   const lastObdUpdateTimestampRef = useRef<number>(0);
   const avgFuelL100kmRef = useRef<number | null>(null);
@@ -736,14 +737,15 @@ export default function Home() {
           timestamp: position.timestamp || now,
         };
 
-        const last = lastRecordedGpsRef.current;
+        // 1. Harita Rota Çizgisi (Polyline) için filtreleme
+        const lastPoly = lastRecordedGpsRef.current;
         let shouldRecord = false;
 
-        if (!last) {
+        if (!lastPoly) {
           shouldRecord = true;
         } else {
-          const dist = calculateDistanceMeters(last.lat, last.lng, newPoint.lat, newPoint.lng);
-          const timeDiff = newPoint.timestamp - last.timestamp;
+          const dist = calculateDistanceMeters(lastPoly.lat, lastPoly.lng, newPoint.lat, newPoint.lng);
+          const timeDiff = newPoint.timestamp - lastPoly.timestamp;
           if (dist >= 10 || (dist >= 4 && timeDiff >= 6000)) {
             shouldRecord = true;
           }
@@ -754,52 +756,62 @@ export default function Home() {
           setRoutePoints((prev) => [...prev, newPoint]);
         }
 
-        // KESİNTİSİZ ÇİFT KANALLI YOL BİLGİSAYARI (OBD + GPS DUAL TELEMETRY)
+        // 2. KESİNTİSİZ ÇİFT KANALLI YOL BİLGİSAYARI (OBD + GPS DUAL TELEMETRY)
         // Eğer OBD bağlı değilse veya son 3.5 saniyedir Bluetooth'tan hız akmıyorsa
-        // (örneğin A2DP müzik akışı sırasında veya OBD yeniden bağlanırken),
-        // kat edilen mesafe ve tüketim GPS üzerinden KESİNTİSİZ kaydedilir!
+        // kat edilen mesafe ve tüketim GPS üzerinden KESİNTİSİZ ve MÜKERRERSİZ kaydedilir!
         const isObdStreaming = now - lastObdUpdateTimestampRef.current < 3500;
 
-        if (!isObdStreaming && last) {
-          const gpsDistM = calculateDistanceMeters(last.lat, last.lng, newPoint.lat, newPoint.lng);
-          const timeDiffSec = Math.max(0.5, (newPoint.timestamp - last.timestamp) / 1000);
+        if (!isObdStreaming) {
+          const lastDistPoint = lastGpsDistancePointRef.current;
+          if (lastDistPoint) {
+            const gpsDistM = calculateDistanceMeters(lastDistPoint.lat, lastDistPoint.lng, newPoint.lat, newPoint.lng);
+            const timeDiffSec = Math.max(0.5, (newPoint.timestamp - lastDistPoint.timestamp) / 1000);
 
-          // Makul GPS hareket filtresi (5 metre - 5 km arası, zaman farkı 60 sn'den az)
-          if (gpsDistM >= 5 && gpsDistM <= 5000 && timeDiffSec <= 60 && accuracy <= 50) {
-            const gpsDistKm = gpsDistM / 1000;
-            const fallbackConsumption =
-              avgFuelL100kmRef.current && avgFuelL100kmRef.current > 0
-                ? avgFuelL100kmRef.current
-                : 5.5; // 1.4 D-4D nominal ortalama (5.5 L/100km)
-            const estimatedFuel = (gpsDistKm * fallbackConsumption) / 100;
-            const deltaMovingMs = gpsSpeedKmh > 2.0 ? timeDiffSec * 1000 : 0;
+            // Makul GPS hareket filtresi (Hassasiyet <= 50m, hız > 1.5 km/h, mesafe 3m - 3000m)
+            if (gpsDistM >= 3 && gpsDistM <= 3000 && timeDiffSec <= 60 && accuracy <= 50 && gpsSpeedKmh > 1.5) {
+              const gpsDistKm = gpsDistM / 1000;
+              const fallbackConsumption =
+                avgFuelL100kmRef.current && avgFuelL100kmRef.current > 0
+                  ? avgFuelL100kmRef.current
+                  : 5.5; // 1.4 D-4D nominal ortalama (5.5 L/100km)
+              const estimatedFuel = (gpsDistKm * fallbackConsumption) / 100;
+              const deltaMovingMs = timeDiffSec * 1000;
 
-            if (gpsDistKm > 0.005) {
-              isTripArchivedRef.current = false;
-            }
-
-            setTrip((prev) => {
-              const updated: TripData = {
-                distanceKm: prev.distanceKm + gpsDistKm,
-                fuelLiters: prev.fuelLiters + estimatedFuel,
-                durationMs: prev.durationMs + timeDiffSec * 1000,
-                movingDurationMs: prev.movingDurationMs + deltaMovingMs,
-                maxSpeed: Math.max(prev.maxSpeed, gpsSpeedKmh),
-                startTime: prev.startTime || now - prev.durationMs,
-              };
-
-              if (now - lastStorageSaveRef.current > 2000) {
-                lastStorageSaveRef.current = now;
-                try {
-                  localStorage.setItem(STORAGE_KEY_TRIP, JSON.stringify(updated));
-                } catch {
-                  // Ignore
-                }
+              if (gpsDistKm > 0.005) {
+                isTripArchivedRef.current = false;
               }
 
-              return updated;
-            });
+              // ÖNEMLİ: Mesafe eklendiği anda referans nokta güncellenerek mükerrer sayım engellenir
+              lastGpsDistancePointRef.current = newPoint;
+
+              setTrip((prev) => {
+                const updated: TripData = {
+                  distanceKm: prev.distanceKm + gpsDistKm,
+                  fuelLiters: prev.fuelLiters + estimatedFuel,
+                  durationMs: prev.durationMs + timeDiffSec * 1000,
+                  movingDurationMs: prev.movingDurationMs + deltaMovingMs,
+                  maxSpeed: Math.max(prev.maxSpeed, gpsSpeedKmh),
+                  startTime: prev.startTime || now - prev.durationMs,
+                };
+
+                if (now - lastStorageSaveRef.current > 2000) {
+                  lastStorageSaveRef.current = now;
+                  try {
+                    localStorage.setItem(STORAGE_KEY_TRIP, JSON.stringify(updated));
+                  } catch {
+                    // Ignore
+                  }
+                }
+
+                return updated;
+              });
+            }
+          } else {
+            lastGpsDistancePointRef.current = newPoint;
           }
+        } else {
+          // OBD canlı akarken GPS referansı sürekli güncel tutulur (geçiş anında sıçrama olmaması için)
+          lastGpsDistancePointRef.current = newPoint;
         }
       },
       (err) => {
@@ -992,6 +1004,7 @@ export default function Home() {
     setRoutePoints([]);
     isTripArchivedRef.current = false;
     lastRecordedGpsRef.current = null;
+    lastGpsDistancePointRef.current = null;
     lastUpdateRef.current = null;
     try {
       localStorage.setItem(STORAGE_KEY_TRIP, JSON.stringify(fresh));
@@ -1275,6 +1288,26 @@ export default function Home() {
     return null;
   }, [avgFuelL100km, fuelPrice]);
 
+  // Anlık Maliyet: Seyir halindeyken ₺/km, rölantide dururken ₺/saat
+  const instantCost = useMemo(() => {
+    if (fuel === null || fuel <= 0 || fuelPrice <= 0) {
+      return { value: null, unit: fuelUnit === "L/h" ? "₺/saat" : "₺/km" };
+    }
+    if (fuelUnit === "L/100km") {
+      return {
+        value: (fuel * fuelPrice) / 100,
+        unit: "₺/km",
+      };
+    }
+    if (fuelUnit === "L/h") {
+      return {
+        value: fuel * fuelPrice,
+        unit: "₺/saat",
+      };
+    }
+    return { value: null, unit: "₺/km" };
+  }, [fuel, fuelUnit, fuelPrice]);
+
   const instantCostTLPerKm = useMemo(() => {
     if (fuelUnit === "L/100km" && fuel !== null && fuel > 0) {
       return (fuel * fuelPrice) / 100;
@@ -1282,20 +1315,33 @@ export default function Home() {
     return null;
   }, [fuel, fuelUnit, fuelPrice]);
 
-  // 2006 Toyota 1.4 D-4D (90 HP / 190 Nm) Tahmini Anlık Güç ve Tork
+  // 2006 Toyota 1.4 D-4D (90 HP / 190 Nm) Gerçekçi Dyno Güç ve Tork Eğrisi
+  // Fabrika Normları: 190 Nm @ 1800–3000 d/d, 90 PS (HP) @ 3800 d/d
   const estimatedTorqueNm = useMemo(() => {
     if (load === null || rpm === null || rpm < 500) return 0;
-    const rpmFactor =
-      rpm >= 1700 && rpm <= 3200
-        ? 1.0
-        : rpm < 1700
-          ? 0.75 + 0.25 * ((rpm - 750) / 950)
-          : Math.max(0.65, 1.0 - (rpm - 3200) / 2000);
+    let rpmFactor = 1.0;
+    if (rpm < 1800) {
+      // 800 d/d rölantide ~100 Nm (0.53) -> 1800 d/d'de turbo dolumuyla tam 190 Nm (1.0)
+      const p = Math.max(0, (rpm - 800) / 1000);
+      rpmFactor = 0.53 + 0.47 * p;
+    } else if (rpm <= 3000) {
+      // 1800 - 3000 d/d: Zirve tork platosu (190 Nm)
+      rpmFactor = 1.0;
+    } else if (rpm <= 3800) {
+      // 3000 d/d'de 190 Nm -> 3800 d/d'de 166.35 Nm (3800 d/d'de tam fabrika normu 90.0 HP üretir)
+      const p = (rpm - 3000) / 800;
+      rpmFactor = 1.0 - 0.1245 * p;
+    } else {
+      // 3800 d/d üstü: 4500 d/d'ye kadar kademeli tork düşüşü
+      const p = Math.min(1.0, (rpm - 3800) / 700);
+      rpmFactor = Math.max(0.6, 0.8755 - 0.25 * p);
+    }
     return Math.round((load / 100) * 190 * Math.max(0.1, rpmFactor));
   }, [load, rpm]);
 
   const estimatedHorsepower = useMemo(() => {
     if (estimatedTorqueNm === 0 || rpm === null) return 0;
+    // PS (Metrik Beygir Gücü): (Tork_Nm * RPM) / 7023.5
     const hp = (estimatedTorqueNm * rpm) / 7023.5;
     return Math.min(95, Math.round(hp));
   }, [estimatedTorqueNm, rpm]);
@@ -1502,7 +1548,7 @@ export default function Home() {
   };
 
 
-  const boostPercent = Math.max(0, Math.min(100, (((turboBoost ?? 0) + 0.2) / 1.7) * 100));
+  const boostPercent = Math.max(0, Math.min(100, ((turboBoost ?? 0) / 1.5) * 100));
   const torquePercent = Math.max(0, Math.min(100, (estimatedTorqueNm / 190) * 100));
   const hpPercent = Math.max(0, Math.min(100, (estimatedHorsepower / 90) * 100));
   const loadPercent = Math.max(0, Math.min(100, load ?? 0));
@@ -1871,7 +1917,7 @@ export default function Home() {
                   />
                 </div>
                 <div className="mt-1 flex items-center justify-between text-[9px] text-muted">
-                  <span>-0.2 Bar</span>
+                  <span>0.0 Bar</span>
                   <span className="text-amber-300 font-bold">PEAK: {perf.peakBoost.toFixed(2)} Bar</span>
                   <span>1.5 Bar</span>
                 </div>
@@ -2145,7 +2191,7 @@ export default function Home() {
                   Anlık Maliyet
                 </div>
                 <div className="mt-1 text-2xl font-bold text-amber-300 font-display tabular-nums">
-                  <SmoothNumber value={instantCostTLPerKm} digits={2} /> <span className="text-xs text-amber-400">₺/km</span>
+                  <SmoothNumber value={instantCost.value} digits={2} /> <span className="text-xs text-amber-400">{instantCost.unit}</span>
                 </div>
               </div>
 
