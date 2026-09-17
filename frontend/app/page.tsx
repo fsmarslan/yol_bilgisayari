@@ -458,9 +458,9 @@ export default function Home() {
     map_kpa: 101,
     distance_mil_on: 0,
     turbo_boost_bar: 0.0,
-    fuel_display: 0.6,
+    fuel_display: 0.48,
     fuel_unit: "L/h",
-    fuel_rate_lph: 0.6,
+    fuel_rate_lph: 0.48,
     battery_voltage: 14.2,
     last_error: null,
     updated_at: new Date().toISOString(),
@@ -479,7 +479,7 @@ export default function Home() {
       let load = 15;
       let boost = 0.0;
       let throttle = 0;
-      let fuel = 0.6;
+      let fuel = 0.48;
       let unit = "L/h";
 
       if (cycle < 3) {
@@ -489,7 +489,7 @@ export default function Home() {
         load = 18;
         boost = 0.0;
         throttle = 0;
-        fuel = 0.6;
+        fuel = 0.48;
         unit = "L/h";
       } else if (cycle < 8) {
         // 1. & 2. Vites Hizlanma
@@ -528,7 +528,7 @@ export default function Home() {
         load = 10;
         boost = 0.0;
         throttle = 0;
-        fuel = speed > 15 ? 0.0 : 0.6;
+        fuel = speed > 15 ? 0.0 : 0.48;
         unit = speed > 15 ? "L/100km" : "L/h";
       }
 
@@ -771,9 +771,9 @@ export default function Home() {
             if (gpsDistM >= 3 && gpsDistM <= 3000 && timeDiffSec <= 60 && accuracy <= 50 && gpsSpeedKmh > 1.5) {
               const gpsDistKm = gpsDistM / 1000;
               const fallbackConsumption =
-                avgFuelL100kmRef.current && avgFuelL100kmRef.current > 0
+                avgFuelL100kmRef.current && avgFuelL100kmRef.current > 0 && avgFuelL100kmRef.current <= 15.0
                   ? avgFuelL100kmRef.current
-                  : 5.5; // 1.4 D-4D nominal ortalama (5.5 L/100km)
+                  : 5.2; // 1.4 D-4D nominal karma ortalama (5.2 L/100km)
               const estimatedFuel = (gpsDistKm * fallbackConsumption) / 100;
               const deltaMovingMs = timeDiffSec * 1000;
 
@@ -909,8 +909,8 @@ export default function Home() {
     }
 
     // Arka planda navigasyon açıkken veya ekran kilitliyken Android WebView timer gecikmelerini tolere et
-    // 25 saniyeye kadar olan tüm arka plan paketleri KESİNTİSİZ entegre edilir (çöpe atılmaz!)
-    const effectiveDelta = Math.min(deltaSeconds, 25.0);
+    // 8 saniyeye kadar olan tüm arka plan paketleri KESİNTİSİZ entegre edilir (aşırı gecikmelerde sıçrama önlenir)
+    const effectiveDelta = Math.min(deltaSeconds, 8.0);
 
     const speed = Number.isFinite(data.speed_kmh) ? Math.max(0, data.speed_kmh!) : 0;
     const deltaDistanceKm = (speed * effectiveDelta) / 3600;
@@ -924,6 +924,11 @@ export default function Home() {
       } else {
         rawFuelRate = 0;
       }
+    }
+
+    // KRİTİK: Motor çalışmıyorsa (RPM < 400 veya null), kontak açıkken ASLA yakıt eklenemez
+    if (!data.rpm || data.rpm < 400) {
+      rawFuelRate = 0;
     }
 
     const validFuelRate = Number.isFinite(rawFuelRate) ? Math.max(0, rawFuelRate!) : 0;
@@ -1258,8 +1263,11 @@ export default function Home() {
   const currentGear = useMemo(() => estimateGear(speed, rpm), [speed, rpm]);
 
   const avgFuelL100km = useMemo(() => {
-    if (trip.distanceKm >= 0.05 && trip.fuelLiters > 0) {
-      return (trip.fuelLiters * 100) / trip.distanceKm;
+    // 100 metre (0.10 km) altındaki ultra kısa mesafelerde rölanti/kalkış bölme sapmasını önle
+    if (trip.distanceKm >= 0.10 && trip.fuelLiters > 0) {
+      const rawAvg = (trip.fuelLiters * 100) / trip.distanceKm;
+      // 1.4 D-4D için fiziksel ortalama tavan sınırı (en dik rampa/aşırı agresif kalkış dahil)
+      return Math.min(18.0, Math.round(rawAvg * 100) / 100);
     }
     return null;
   }, [trip.distanceKm, trip.fuelLiters]);
@@ -1280,17 +1288,20 @@ export default function Home() {
     return trip.fuelLiters * fuelPrice;
   }, [trip.fuelLiters, fuelPrice]);
 
-  // Trip ortalama tüketimine göre km başına maliyet (₺/km): (Ort. Tüketim * Yakıt Fiyatı) / 100
+  // Trip ortalama tüketimine göre km başına maliyet (₺/km): Toplam Harcanan TL / Mesafe KM
   const tripCostTLPerKm = useMemo(() => {
+    if (trip.distanceKm >= 0.10 && tripTotalCostTL > 0) {
+      return tripTotalCostTL / trip.distanceKm;
+    }
     if (avgFuelL100km !== null && avgFuelL100km > 0 && fuelPrice > 0) {
       return (avgFuelL100km * fuelPrice) / 100;
     }
     return null;
-  }, [avgFuelL100km, fuelPrice]);
+  }, [trip.distanceKm, tripTotalCostTL, avgFuelL100km, fuelPrice]);
 
   // Anlık Maliyet: Seyir halindeyken ₺/km, rölantide dururken ₺/saat
   const instantCost = useMemo(() => {
-    if (fuel === null || fuel <= 0 || fuelPrice <= 0) {
+    if (fuel === null || fuelPrice <= 0 || (rpm !== null && rpm < 400)) {
       return { value: null, unit: fuelUnit === "L/h" ? "₺/saat" : "₺/km" };
     }
     if (fuelUnit === "L/100km") {
@@ -1306,7 +1317,7 @@ export default function Home() {
       };
     }
     return { value: null, unit: "₺/km" };
-  }, [fuel, fuelUnit, fuelPrice]);
+  }, [fuel, fuelUnit, fuelPrice, rpm]);
 
   const instantCostTLPerKm = useMemo(() => {
     if (fuelUnit === "L/100km" && fuel !== null && fuel > 0) {

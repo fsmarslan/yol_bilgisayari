@@ -551,48 +551,61 @@ class BleTelemetryManager:
         throttle_percent: Optional[float],
     ) -> tuple[Optional[float], str, Optional[float]]:
         """
-        Toyota 1.4 D-4D (1ND-TV) dizel motor karakteristiklerine gore anlik yakit tuketimi hesabi.
-        - Dizel yakit yogunlugu: ~840 g/L
-        - Efektif AFR motor yukune gore degisken (18:1 ile 65:1 arasi)
-        - Deceleration Fuel Cut-off (kompresyonda gaz kesme) destegi
+        2006 Toyota Corolla 1.4 D-4D (1ND-TV, 90 HP, 190 Nm) Hassas Dizel Yakıt Modeli.
+        - Motor Hacmi: 1364 cc Turbo Common-Rail Dizel
+        - Gerçek Rölanti Tüketimi: 0.45 - 0.55 L/saat (Nominal ~0.50 L/saat)
+        - Gerçek Fabrika Karma Tüketimi: 4.8 - 5.3 L/100km
+        - Tam Gaz Maksimum Tüketim: 16.5 - 17.5 L/saat
         """
+        # 1. Motor Kapalı / Kontak Açık Koruması:
+        if rpm is None or rpm < 400:
+            unit = "L/100km" if speed_kmh is not None and speed_kmh >= 10.0 else "L/h"
+            return 0.0, unit, 0.0
+
         if maf_gps is None or speed_kmh is None:
             return None, "--", None
 
-        # 1. Kompresyonda Gaz Kesme (Deceleration Fuel Cut-off)
-        # Devir rölanti üstündeyken gaz pedalı bırakılmışsa enjektörler tamamen kapatılır.
-        is_coasting = False
-        if rpm is not None and rpm > 1150:
-            if throttle_percent is not None and throttle_percent <= 2.0:
-                is_coasting = True
-            elif load_percent is not None and load_percent <= 14.0:
-                is_coasting = True
+        safe_speed = max(0.0, speed_kmh)
 
-        if is_coasting and speed_kmh > 15.0:
+        # 2. Kompresyonda Gaz Kesme (Deceleration Fuel Cut-off / DFCO):
+        # 1ND-TV motorlarda devir rölanti üstündeyken (RPM > 1100) gaz bırakıldığında enjektörler kapatılır.
+        is_pedal_released = (
+            (throttle_percent is not None and throttle_percent <= 4.5) or
+            (load_percent is not None and load_percent <= 18.0 and safe_speed > 8.0)
+        )
+
+        if rpm > 1100 and is_pedal_released and safe_speed > 8.0:
             return 0.0, "L/100km", 0.0
 
-        # 2. Dizel Non-Lineer Efektif AFR Modellemesi (1ND-TV 1.4 D-4D Karakteristigi)
-        # Dizelde yuk arttikca AFR lineer degil, hizla stoikiometriye dogru inen bir egri izler.
-        if load_percent is not None:
-            clamped_load = max(0.0, min(100.0, load_percent))
-            # Yuk %0 (rolanti/cok hafif yuk) -> AFR ~55:1 (fakir)
-            # Yuk %30 (90 km/h cruise) -> AFR ~32-33:1 (3.8-4.1 L/100km)
-            # Yuk %50 (orta hizlanma) -> AFR ~24:1
-            # Yuk %100 (tam gaz dip gaz) -> AFR ~17.5:1 (tam guc)
-            load_factor = (1.0 - (clamped_load / 100.0)) ** 3.0
-            effective_afr = MIN_DIESEL_AFR + ((MAX_DIESEL_AFR - MIN_DIESEL_AFR) * load_factor)
-        else:
-            effective_afr = CRUISE_DEFAULT_AFR
+        # 3. Gerçek Rölanti Tüketim Kalibrasyonu (Hız < 2.5 km/h ve RPM <= 1050):
+        if safe_speed < 2.5 and rpm <= 1050:
+            idle_afr = 78.0
+            raw_idle_lph = (max(4.0, maf_gps) / idle_afr) * 3600.0 / DIESEL_DENSITY_G_PER_L
+            bounded_idle_lph = max(0.40, min(0.85, round(raw_idle_lph, 2)))
+            return bounded_idle_lph, "L/h", bounded_idle_lph
 
-        # Yakit debisi (Gram/saniye -> Litre/saat)
+        # 4. Dinamik Yük Doğrulama & Denso 0xFF (%100) Hata Filtresi:
+        theoretical_air_na = (rpm * 1.364 * 1.2) / 120.0
+        air_ratio = maf_gps / (theoretical_air_na * 1.7) if theoretical_air_na > 0 else 0.3
+
+        if load_percent is not None and 5.0 <= load_percent <= 95.0:
+            effective_load = load_percent / 100.0
+        else:
+            effective_load = max(0.15, min(0.95, air_ratio))
+
+        # 5. 1ND-TV Gerçekçi Dizel Efektif AFR Eğrisi:
+        effective_afr = MIN_DIESEL_AFR + ((MAX_DIESEL_AFR - MIN_DIESEL_AFR) * ((1.0 - effective_load) ** 1.15))
+
+        # Yakıt debisi (Gram/saniye -> Litre/saat)
         fuel_mass_gps = maf_gps / effective_afr
         liters_per_hour = (fuel_mass_gps * 3600.0) / DIESEL_DENSITY_G_PER_L
+        liters_per_hour = max(0.35, min(17.5, liters_per_hour))
 
-        # Hiz durumuna gore birim ve deger secimi
-        if speed_kmh > 5.0:
-            l_per_100km = (liters_per_hour / speed_kmh) * 100.0
-            # Asiri yuksek mantiksiz degerleri filtrele (ornek: kalkista max 35 L/100km)
-            return min(35.0, round(l_per_100km, 2)), "L/100km", round(liters_per_hour, 3)
+        # 6. Hıza Göre Birim ve Değer Seçimi:
+        if safe_speed >= 10.0:
+            l_per_100km = (liters_per_hour / safe_speed) * 100.0
+            bounded_l100km = min(22.0, round(l_per_100km, 1))
+            return bounded_l100km, "L/100km", round(liters_per_hour, 3)
         else:
             return round(liters_per_hour, 2), "L/h", round(liters_per_hour, 3)
 
