@@ -47,14 +47,22 @@ class OBDService:
         return float(value.magnitude)
 
     @staticmethod
-    def _calculate_fuel_l100km(maf_gps: Optional[float], speed_kmh: Optional[float]) -> Optional[float]:
-        if maf_gps is None or speed_kmh is None or speed_kmh <= 0:
-            return None
-        # Toyota 1.4 D-4D Euro Diesel: Yoğunluk ~840 g/L, Ortalama efektif AFR ~52.0
-        if speed_kmh < 10.0:
-            return None
-        l_per_100km = ((maf_gps * 3600.0) / (52.0 * 840.0)) / speed_kmh * 100.0
-        return min(22.0, round(l_per_100km, 1))
+    def _calculate_fuel_l100km(
+        maf_gps: Optional[float],
+        speed_kmh: Optional[float],
+        rpm: Optional[float] = None,
+        load_percent: Optional[float] = None,
+        throttle_percent: Optional[float] = None,
+    ) -> Optional[float]:
+        from .ble_service import calculate_diesel_fuel
+        fuel_display, fuel_unit, _ = calculate_diesel_fuel(
+            maf_gps=maf_gps,
+            speed_kmh=speed_kmh,
+            load_percent=load_percent,
+            rpm=rpm,
+            throttle_percent=throttle_percent,
+        )
+        return fuel_display if fuel_unit == "L/100km" else None
 
     def get_telemetry(self) -> TelemetryData:
         try:
@@ -73,7 +81,7 @@ class OBDService:
         maf_gps = self._query_value(obd.commands.MAF, "g/s")
         coolant_temp_c = self._query_value(obd.commands.COOLANT_TEMP, "degC")
 
-        fuel_l_per_100km = self._calculate_fuel_l100km(maf_gps, speed_kmh)
+        fuel_l_per_100km = self._calculate_fuel_l100km(maf_gps, speed_kmh, rpm=rpm)
 
         return TelemetryData(
             rpm=rpm,

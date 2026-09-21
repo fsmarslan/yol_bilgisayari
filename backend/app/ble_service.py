@@ -20,12 +20,141 @@ from .config import (
     MOVING_POLL_INTERVAL_SECONDS,
     SLOW_PID_INTERVAL_SECONDS,
     DIESEL_DENSITY_G_PER_L,
-    MIN_DIESEL_AFR,
-    MAX_DIESEL_AFR,
-    CRUISE_DEFAULT_AFR,
+    DIESEL_AFR_IDLE,
+    DIESEL_AFR_CRUISE,
+    DIESEL_AFR_MID,
+    DIESEL_AFR_HIGH,
+    ENGINE_CYLINDERS,
 )
 
 logger = logging.getLogger("ble_service")
+
+
+def calculate_diesel_afr(load_percent: Optional[float]) -> float:
+    """
+    2006 Toyota Corolla 1.4 D-4D (1ND-TV) Dinamik AFR (Hava/Yakıt Oranı) Eğrisi:
+    - Rölanti / Çok Düşük Yük (Load <= 15%): AFR = 38.0
+    - Düşük / Sabit Hızda Akma (15% < Load <= 35%): AFR = 28.0
+    - Orta Yük / Şehir İçi (35% < Load <= 65%): AFR = 22.0
+    - Yüksek Yük / Rampa / Hızlanma (Load > 65%): AFR = 17.5 - 18.0 (Varsayılan: 17.5)
+    """
+    if load_percent is None:
+        return DIESEL_AFR_CRUISE
+
+    if load_percent <= 15.0:
+        return DIESEL_AFR_IDLE
+    elif load_percent <= 35.0:
+        return DIESEL_AFR_CRUISE
+    elif load_percent <= 65.0:
+        return DIESEL_AFR_MID
+    else:
+        return DIESEL_AFR_HIGH
+
+
+def calculate_fuel_rate_from_injection(
+    injection_volume_mm3: float,
+    rpm: float,
+    cylinders: int = ENGINE_CYLINDERS,
+) -> float:
+    """
+    Toyota Mode 21 Enjektör Hacminden Anlık Yakıt Akışı (L/h):
+    Yakıt (L/h) = (Enjektör_Hacmi_mm3 * RPM * Silindir_Sayısı(4) * 60) / (2 * 1_000_000)
+    """
+    return (injection_volume_mm3 * rpm * cylinders * 60.0) / (2.0 * 1_000_000.0)
+
+
+def calculate_fuel_rate_from_maf(
+    maf_gps: float,
+    afr: float,
+    density_g_per_l: float = DIESEL_DENSITY_G_PER_L,
+) -> float:
+    """
+    Dizel MAF Tabanlı Yakıt Akışı (L/h):
+    Yakıt (L/h) = (MAF / (AFR * 840)) * 3600
+    """
+    return (maf_gps / (afr * density_g_per_l)) * 3600.0
+
+
+def is_dfco_active(
+    speed_kmh: Optional[float],
+    rpm: Optional[float],
+    throttle_percent: Optional[float],
+    load_percent: Optional[float],
+) -> bool:
+    """
+    Deceleration Fuel Cut-Off (DFCO) Kontrolü:
+    Araç viteste akarken (Speed > 20 km/h) gaz bırakıldığında
+    (Throttle < 2% veya Load < 8% ve RPM > 1200) enjektörler püskürtmeyi keser.
+    """
+    if speed_kmh is None or rpm is None:
+        return False
+
+    if speed_kmh <= 20.0 or rpm <= 1200.0:
+        return False
+
+    pedal_released = (
+        (throttle_percent is not None and throttle_percent < 2.0)
+        or (load_percent is not None and load_percent < 8.0)
+    )
+    return pedal_released
+
+
+def calculate_diesel_fuel(
+    maf_gps: Optional[float],
+    speed_kmh: Optional[float],
+    load_percent: Optional[float],
+    rpm: Optional[float],
+    throttle_percent: Optional[float] = None,
+    injection_volume_mm3: Optional[float] = None,
+) -> tuple[Optional[float], str, Optional[float]]:
+    """
+    2006 Toyota Corolla 1.4 D-4D (1ND-TV, 90 HP, 190 Nm) Hassas Dizel Yakıt Modeli:
+    1. Dizel yoğunluğu: 840 g/L sabit.
+    2. Dinamik AFR: Yüke bağlı (38.0 / 28.0 / 22.0 / 17.5).
+    3. DFCO: Speed > 20 km/h, RPM > 1200, (Throttle < 2% veya Load < 8%) -> 0.0 L/h.
+    4. Enjektör verisi (Mode 21): Varsa öncelikli tüketim kaynağı.
+    5. Sıcak rölantide 0.5 - 0.7 L/h bandı korunur.
+    """
+    # 1. Motor Kapalı / Marş Altı Koruması:
+    if rpm is None or rpm < 400:
+        unit = "L/100km" if speed_kmh is not None and speed_kmh >= 10.0 else "L/h"
+        return 0.0, unit, 0.0
+
+    safe_speed = max(0.0, speed_kmh) if speed_kmh is not None else 0.0
+
+    # 2. Deceleration Fuel Cut-Off (DFCO) Kontrolü:
+    if is_dfco_active(speed_kmh, rpm, throttle_percent, load_percent):
+        return 0.0, "L/100km", 0.0
+
+    # 3. Tüketim Hesabı (Öncelik: Mode 21 Enjektör Hacmi, Fallback: MAF):
+    liters_per_hour: Optional[float] = None
+
+    if injection_volume_mm3 is not None and injection_volume_mm3 >= 0.0:
+        liters_per_hour = calculate_fuel_rate_from_injection(injection_volume_mm3, rpm)
+    elif maf_gps is not None and maf_gps >= 0.0:
+        # Denso ECU 0xFF (%100) Rölanti Filtresi:
+        # Araç dururken veya rölantide (Hız < 2.5 km/h ve RPM <= 1050) ECU bazen %100 yük raporlar
+        effective_load = load_percent
+        if safe_speed < 2.5 and rpm <= 1050:
+            if effective_load is None or effective_load > 50.0:
+                effective_load = 14.0  # Gerçek rölanti baz yükü (<= 15%)
+
+        afr = calculate_diesel_afr(effective_load)
+        liters_per_hour = calculate_fuel_rate_from_maf(maf_gps, afr)
+
+    if liters_per_hour is None:
+        return None, "--", None
+
+    # 4. 1ND-TV Fiziksel Tavanı (Tam gaz 90 HP'de maks ~17.5 L/saat):
+    liters_per_hour = max(0.0, min(18.0, liters_per_hour))
+
+    # 5. Hıza Göre Birim ve Değer Seçimi:
+    if safe_speed >= 10.0:
+        l_per_100km = (liters_per_hour / safe_speed) * 100.0
+        bounded_l100km = min(25.0, round(l_per_100km, 1))
+        return bounded_l100km, "L/100km", round(liters_per_hour, 3)
+    else:
+        return round(liters_per_hour, 2), "L/h", round(liters_per_hour, 3)
 
 
 class BleTelemetryManager:
@@ -42,6 +171,7 @@ class BleTelemetryManager:
             "map_kpa": None,
             "distance_mil_on": None,
             "turbo_boost_bar": None,
+            "injection_volume_mm3": None,
             "fuel_display": None,
             "fuel_unit": "--",
             "fuel_rate_lph": None,
@@ -60,6 +190,10 @@ class BleTelemetryManager:
         # Dinamik atmosferik basınç kalibrasyonu (kPa)
         self._ambient_pressure_kpa: float = 101.3
         self._ambient_calibrated: bool = False
+
+        # Mode 21 Enjektör Hacmi desteği takibi
+        self._mode21_supported: Optional[bool] = None
+        self._mode21_fail_count: int = 0
 
         # Yavaş PID sorgulama zamanlayıcısı
         self._last_slow_poll_time: float = 0.0
@@ -134,6 +268,7 @@ class BleTelemetryManager:
                 throttle = 35.0 + (25.0 * p)
                 boost = 0.15 + (0.85 * p)
                 maf = 10.0 + (32.0 * p)
+                injection_vol = 30.0 + (12.0 * p)
             elif cycle_pos < 14.0:
                 # 2. ve 3. Vites Hızlanma (28 - 72 km/h)
                 p = (cycle_pos - 6.0) / 8.0
@@ -144,6 +279,7 @@ class BleTelemetryManager:
                 throttle = 40.0
                 boost = 0.85 + (0.35 * (1.0 - p))
                 maf = 22.0 + (25.0 * (1.0 - p))
+                injection_vol = 22.0 + (10.0 * (1.0 - p))
             elif cycle_pos < 34.0:
                 # 4. / 5. Vites Sabit Seyir (Cruise) (72 - 92 km/h)
                 p = (cycle_pos - 14.0) / 20.0
@@ -154,6 +290,7 @@ class BleTelemetryManager:
                 throttle = 18.0
                 boost = 0.32 + (0.08 * osc)
                 maf = 26.0 + (3.0 * osc)
+                injection_vol = 14.5 + (1.5 * osc)
             elif cycle_pos < 46.0:
                 # Gaz Kesme / Kompresyon / Frenleme (Deceleration Fuel Cut-Off)
                 p = (cycle_pos - 34.0) / 12.0
@@ -163,15 +300,17 @@ class BleTelemetryManager:
                 throttle = 0.0
                 boost = 0.0
                 maf = 3.8
+                injection_vol = 0.0
             else:
                 # Rölantide Bekleme (Kırmızı ışık / park)
                 speed = 0.0
                 osc = (cycle_pos % 2.0) / 2.0
                 rpm = 820.0 + (15.0 * osc)
-                load = 18.0
+                load = 13.5 + (1.0 * osc)  # Rölanti yükü (Load <= 15% -> AFR = 38.0)
                 throttle = 0.0
                 boost = 0.0
-                maf = 4.2
+                maf = 4.8 + (0.2 * osc)
+                injection_vol = 5.5 + (0.2 * osc)
 
             map_kpa = 100.0 + (boost * 100.0)
             intake_temp = 25.0
@@ -183,6 +322,7 @@ class BleTelemetryManager:
                 load_percent=load,
                 rpm=rpm,
                 throttle_percent=throttle,
+                injection_volume_mm3=injection_vol,
             )
 
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -199,6 +339,7 @@ class BleTelemetryManager:
                 map_kpa=round(map_kpa),
                 distance_mil_on=distance,
                 turbo_boost_bar=round(boost, 2),
+                injection_volume_mm3=round(injection_vol, 2),
                 fuel_display=fuel_display,
                 fuel_unit=fuel_unit,
                 fuel_rate_lph=fuel_rate_lph,
@@ -379,6 +520,19 @@ class BleTelemetryManager:
         # Dinamik Atmosferik Basınç ve Turbo Boost Hesabı
         turbo_boost = self._calculate_turbo_boost(map_kpa, rpm)
 
+        # Mode 21 Toyota Enjektör Hacmi (Injection Volume) sorgusu (Opsiyonel / Fallback: MAF)
+        injection_volume = None
+        if self._mode21_supported is not False:
+            injection_volume = await self._query_mode21_injection(client)
+            if injection_volume is not None:
+                self._mode21_supported = True
+                self._mode21_fail_count = 0
+            else:
+                self._mode21_fail_count += 1
+                if self._mode21_fail_count >= 3:
+                    logger.info("Mode 21 (Enjektör Hacmi) ECU tarafından desteklenmiyor, MAF tabanlı dinamik AFR hesaplamasına devam ediliyor.")
+                    self._mode21_supported = False
+
         # Toyota 1.4 D-4D Dizel Akıllı Anlık Tüketim Hesabı
         fuel_display, fuel_unit, fuel_rate_lph = self._calculate_diesel_fuel(
             maf_gps=maf,
@@ -386,6 +540,7 @@ class BleTelemetryManager:
             load_percent=load,
             rpm=rpm,
             throttle_percent=throttle,
+            injection_volume_mm3=injection_volume,
         )
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -402,6 +557,7 @@ class BleTelemetryManager:
             map_kpa=map_kpa,
             distance_mil_on=distance,
             turbo_boost_bar=turbo_boost,
+            injection_volume_mm3=injection_volume,
             fuel_display=fuel_display,
             fuel_unit=fuel_unit,
             fuel_rate_lph=fuel_rate_lph,
@@ -542,72 +698,66 @@ class BleTelemetryManager:
         # Dizel motorda emme manifoldunda negatif vakum olmadığı için 0 altını sıfırla
         return max(0.0, round(boost_bar, 2))
 
+    async def _query_mode21_injection(self, client: BleakClient) -> Optional[float]:
+        """
+        Toyota Denso Mode 21 Enjektör Hacmi (Injection Volume) Sorgusu (PID 2167).
+        Format: 2167 -> 61 67 AA BB (mm3/strok)
+        """
+        try:
+            raw = await self._send_command(client, "2167")
+            payload = self._extract_payload_mode21(raw, "67", bytes_needed=2)
+            if payload is not None:
+                return self._parse_injection_volume(payload)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _extract_payload_mode21(raw_text: str, pid_hex: str, bytes_needed: int = 2) -> Optional[list[int]]:
+        normalized = "".join(ch for ch in raw_text.upper() if ch in "0123456789ABCDEF")
+        marker = f"61{pid_hex.upper()}"
+        pos = normalized.find(marker)
+        if pos == -1:
+            return None
+        tail = normalized[pos + len(marker):]
+        chunk = tail[: bytes_needed * 2]
+        if len(chunk) < bytes_needed * 2:
+            return None
+        try:
+            return [int(chunk[i : i + 2], 16) for i in range(0, len(chunk), 2)]
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_injection_volume(data: list[int]) -> Optional[float]:
+        if not data:
+            return None
+        if len(data) >= 2:
+            val = ((data[0] * 256) + data[1]) / 100.0
+            if 0.0 <= val <= 150.0:
+                return round(val, 2)
+        val = float(data[0])
+        if 0.0 <= val <= 150.0:
+            return round(val, 2)
+        return None
+
     @staticmethod
     def _calculate_diesel_fuel(
         maf_gps: Optional[float],
         speed_kmh: Optional[float],
         load_percent: Optional[float],
         rpm: Optional[float],
-        throttle_percent: Optional[float],
+        throttle_percent: Optional[float] = None,
+        injection_volume_mm3: Optional[float] = None,
     ) -> tuple[Optional[float], str, Optional[float]]:
-        """
-        2006 Toyota Corolla 1.4 D-4D (1ND-TV, 90 HP, 190 Nm) Hassas Dizel Yakıt Modeli.
-        - Motor Hacmi: 1364 cc Turbo Common-Rail Dizel
-        - Gerçek Rölanti Tüketimi: 0.45 - 0.55 L/saat (Nominal ~0.50 L/saat)
-        - Gerçek Fabrika Karma Tüketimi: 4.8 - 5.3 L/100km
-        - Tam Gaz Maksimum Tüketim: 16.5 - 17.5 L/saat
-        """
-        # 1. Motor Kapalı / Kontak Açık Koruması:
-        if rpm is None or rpm < 400:
-            unit = "L/100km" if speed_kmh is not None and speed_kmh >= 10.0 else "L/h"
-            return 0.0, unit, 0.0
-
-        if maf_gps is None or speed_kmh is None:
-            return None, "--", None
-
-        safe_speed = max(0.0, speed_kmh)
-
-        # 2. Kompresyonda Gaz Kesme (Deceleration Fuel Cut-off / DFCO):
-        # 1ND-TV motorlarda devir rölanti üstündeyken (RPM > 1100) gaz bırakıldığında enjektörler kapatılır.
-        is_pedal_released = (
-            (throttle_percent is not None and throttle_percent <= 4.5) or
-            (load_percent is not None and load_percent <= 18.0 and safe_speed > 8.0)
+        return calculate_diesel_fuel(
+            maf_gps=maf_gps,
+            speed_kmh=speed_kmh,
+            load_percent=load_percent,
+            rpm=rpm,
+            throttle_percent=throttle_percent,
+            injection_volume_mm3=injection_volume_mm3,
         )
-
-        if rpm > 1100 and is_pedal_released and safe_speed > 8.0:
-            return 0.0, "L/100km", 0.0
-
-        # 3. Gerçek Rölanti Tüketim Kalibrasyonu (Hız < 2.5 km/h ve RPM <= 1050):
-        if safe_speed < 2.5 and rpm <= 1050:
-            idle_afr = 78.0
-            raw_idle_lph = (max(4.0, maf_gps) / idle_afr) * 3600.0 / DIESEL_DENSITY_G_PER_L
-            bounded_idle_lph = max(0.40, min(0.85, round(raw_idle_lph, 2)))
-            return bounded_idle_lph, "L/h", bounded_idle_lph
-
-        # 4. Dinamik Yük Doğrulama & Denso 0xFF (%100) Hata Filtresi:
-        theoretical_air_na = (rpm * 1.364 * 1.2) / 120.0
-        air_ratio = maf_gps / (theoretical_air_na * 1.7) if theoretical_air_na > 0 else 0.3
-
-        if load_percent is not None and 5.0 <= load_percent <= 95.0:
-            effective_load = load_percent / 100.0
-        else:
-            effective_load = max(0.15, min(0.95, air_ratio))
-
-        # 5. 1ND-TV Gerçekçi Dizel Efektif AFR Eğrisi:
-        effective_afr = MIN_DIESEL_AFR + ((MAX_DIESEL_AFR - MIN_DIESEL_AFR) * ((1.0 - effective_load) ** 1.15))
-
-        # Yakıt debisi (Gram/saniye -> Litre/saat)
-        fuel_mass_gps = maf_gps / effective_afr
-        liters_per_hour = (fuel_mass_gps * 3600.0) / DIESEL_DENSITY_G_PER_L
-        liters_per_hour = max(0.35, min(17.5, liters_per_hour))
-
-        # 6. Hıza Göre Birim ve Değer Seçimi:
-        if safe_speed >= 10.0:
-            l_per_100km = (liters_per_hour / safe_speed) * 100.0
-            bounded_l100km = min(22.0, round(l_per_100km, 1))
-            return bounded_l100km, "L/100km", round(liters_per_hour, 3)
-        else:
-            return round(liters_per_hour, 2), "L/h", round(liters_per_hour, 3)
 
 
 telemetry_manager = BleTelemetryManager()

@@ -46,9 +46,10 @@ const STORAGE_KEY_LAST_DEVICE_NAME = "auradrive_last_ble_device_name";
 
 // 2006 Toyota Corolla 1.4 D-4D (1ND-TV) Parametreleri
 const DIESEL_DENSITY_G_PER_L = 840.0;
-const MIN_DIESEL_AFR = 21.0;
-const MAX_DIESEL_AFR = 78.0;
-const CRUISE_DEFAULT_AFR = 52.0;
+const DIESEL_AFR_IDLE = 38.0;      // Rölanti / Çok Düşük Yük (Load <= 15%)
+const DIESEL_AFR_CRUISE = 28.0;    // Düşük / Sabit Seyir (15% < Load <= 35%)
+const DIESEL_AFR_MID = 22.0;       // Orta Yük / Şehir İçi (35% < Load <= 65%)
+const DIESEL_AFR_HIGH = 17.5;      // Yüksek Yük / Rampa / Hızlanma (Load > 65%): 17.5 - 18.0
 
 // Yaygın OBD-II & Toyota Arıza Kodları Sözlüğü
 export const DTC_DATABASE: Record<string, { description: string; system: DtcItem["system"]; severity: DtcItem["severity"] }> = {
@@ -702,85 +703,83 @@ export class MobileObdBleService {
    * Parametreler ve Fiziksel Sınırlar:
    * - Motor Hacmi: 1364 cc (1.364 L) Turbo Intercooler Common-Rail Dizel
    * - Dizel Yoğunluğu: 840 g/L (Euro Dizel @ 15°C)
-   * - Gerçek Rölanti Tüketimi: Sıcak motorda 0.45 - 0.55 L/saat (Nominal ~0.50 L/saat)
-   * - Fabrika Tüketimi: Şehir dışı 4.0 - 4.5, Karma 4.8 - 5.3, Şehir içi 5.5 - 6.5 L/100km
-   * - Tam Gaz (90 HP @ 3800 d/d) Tüketimi: Maksimum 16.5 - 17.5 L/saat
+   * - Dinamik AFR: Yüke bağlı (38.0 / 28.0 / 22.0 / 17.5)
+   * - DFCO: Speed > 20 km/h, RPM > 1200, (Throttle < 2% veya Load < 8%) -> 0.0 L/h
+   * - Mode 21 Enjektör Hacmi: Varsa öncelikli tüketim formülü
+   * - Gerçek Rölanti Tüketimi: Sıcak motorda 0.50 - 0.70 L/saat
    */
+  public static calculateDieselAfr(loadPercent: number | null): number {
+    if (loadPercent === null) return DIESEL_AFR_CRUISE;
+    if (loadPercent <= 15.0) return DIESEL_AFR_IDLE;
+    if (loadPercent <= 35.0) return DIESEL_AFR_CRUISE;
+    if (loadPercent <= 65.0) return DIESEL_AFR_MID;
+    return DIESEL_AFR_HIGH;
+  }
+
+  public static isDfcoActive(
+    speedKmh: number | null,
+    rpm: number | null,
+    throttlePercent: number | null,
+    loadPercent: number | null,
+  ): boolean {
+    if (speedKmh === null || rpm === null) return false;
+    if (speedKmh <= 20.0 || rpm <= 1200.0) return false;
+    return (
+      (throttlePercent !== null && throttlePercent < 2.0) ||
+      (loadPercent !== null && loadPercent < 8.0)
+    );
+  }
+
   private calculateDieselFuel(
     mafGps: number | null,
     speedKmh: number | null,
     loadPercent: number | null,
     rpm: number | null,
     throttlePercent: number | null,
+    injectionVolumeMm3: number | null = null,
   ): [number | null, string, number | null] {
     // 1. Motor Kapalı / Kontak Açık Koruması:
-    // Devir yoksa veya marş devri altındaysa (RPM < 400), motor kesinlikle çalışmıyordur.
-    // MAF gürültüsünden veya kontak açık beklemesinden yakıt hesaplanamaz!
     if (rpm === null || rpm < 400) {
       const unit = speedKmh !== null && speedKmh >= 10.0 ? "L/100km" : "L/h";
       return [0.0, unit, 0.0];
     }
 
-    if (mafGps === null || speedKmh === null) {
-      return [null, "--", null];
-    }
-
-    const safeSpeed = Math.max(0, speedKmh);
+    const safeSpeed = Math.max(0, speedKmh ?? 0);
 
     // 2. Kompresyonda Gaz Kesme (Deceleration Fuel Cut-off / DFCO):
-    // 1ND-TV motorlarda devir rölanti üstündeyken (RPM > 1100) gaz pedalı bırakıldığında enjektörler kapatılır.
-    // Toyota 1.4 D-4D'de PID 0111 sıfır konumunda %2.4 verir; bu nedenle tolerans <= 4.5 olarak belirlenmiştir.
-    const isPedalReleased =
-      (throttlePercent !== null && throttlePercent <= 4.5) ||
-      (loadPercent !== null && loadPercent <= 18.0 && safeSpeed > 8.0);
-
-    if (rpm > 1100 && isPedalReleased && safeSpeed > 8.0) {
+    if (MobileObdBleService.isDfcoActive(speedKmh, rpm, throttlePercent, loadPercent)) {
       return [0.0, "L/100km", 0.0];
     }
 
-    // 3. Gerçek Rölanti Tüketim Kalibrasyonu (Hız < 2.5 km/h ve RPM <= 1050):
-    // 1.4 D-4D sıcak rölantide ~0.45 - 0.55 L/h, soğuk motorda / klima açıkken 0.60 - 0.75 L/h yakar.
-    if (safeSpeed < 2.5 && rpm <= 1050) {
-      const idleAfr = 78.0;
-      const rawIdleLph = (Math.max(4.0, mafGps) / idleAfr) * 3600.0 / DIESEL_DENSITY_G_PER_L;
-      const boundedIdleLph = Math.max(0.40, Math.min(0.85, Math.round(rawIdleLph * 100) / 100));
-      return [boundedIdleLph, "L/h", boundedIdleLph];
+    // 3. Tüketim Hesabı (Öncelik: Mode 21 Enjektör Hacmi, Fallback: MAF):
+    let litersPerHour: number | null = null;
+
+    if (injectionVolumeMm3 !== null && injectionVolumeMm3 >= 0.0) {
+      litersPerHour = (injectionVolumeMm3 * rpm * 4.0 * 60.0) / (2.0 * 1_000_000.0);
+    } else if (mafGps !== null && mafGps >= 0.0) {
+      // Denso ECU 0xFF (%100) Rölanti Filtresi:
+      let effectiveLoad = loadPercent;
+      if (safeSpeed < 2.5 && rpm <= 1050) {
+        if (effectiveLoad === null || effectiveLoad > 50.0) {
+          effectiveLoad = 14.0;
+        }
+      }
+
+      const afr = MobileObdBleService.calculateDieselAfr(effectiveLoad);
+      litersPerHour = (mafGps / (afr * DIESEL_DENSITY_G_PER_L)) * 3600.0;
     }
 
-    // 4. Dinamik Motor Yükü Doğrulama & Denso 0xFF (%100) Hata Filtresi:
-    // Toyota Denso ECU'larda PID 0104 bazen dururken 0xFF (%100) raporlar.
-    // Emilen teorik hava (Air_NA = RPM * 1.364 * 1.2 / 120 = RPM / 73.3) ile MAF oranlanarak kontrol edilir.
-    let effectiveLoad: number;
-    const theoreticalAirNA = (rpm * 1.364 * 1.2) / 120.0;
-    const airRatio = theoreticalAirNA > 0 ? mafGps / (theoreticalAirNA * 1.7) : 0.3;
-
-    if (loadPercent !== null && loadPercent >= 5.0 && loadPercent <= 95.0) {
-      effectiveLoad = loadPercent / 100.0;
-    } else {
-      // Hatalı / uç değerlerde hava akışı oranından dinamik türet
-      effectiveLoad = Math.max(0.15, Math.min(0.95, airRatio));
+    if (litersPerHour === null) {
+      return [null, "--", null];
     }
 
-    // 5. 1ND-TV Gerçekçi Dizel Efektif AFR Eğrisi:
-    // Dizel motorlarda hava kelebeği yoktur; fakir karışımla çalışır:
-    // - Hafif yük / Seyir (Load %20-%35): AFR ~52:1 - 65:1 (3.5 - 4.5 L/100km)
-    // - Orta yük / Hızlanma (Load %40-%60): AFR ~38:1 - 48:1 (5.0 - 6.5 L/100km)
-    // - Yüksek yük (Load %70-%85): AFR ~28:1 - 34:1 (7.5 - 10 L/100km)
-    // - Tam Gaz (Load %90-%100): AFR ~21:1 - 24:1 (Duman sınırı, 90 HP tepe noktası)
-    const effectiveAfr = MIN_DIESEL_AFR + (MAX_DIESEL_AFR - MIN_DIESEL_AFR) * Math.pow(1.0 - effectiveLoad, 1.15);
+    // 4. Fiziksel Tavan Sınırı (90 HP tam gazda ~17.5 L/saat):
+    litersPerHour = Math.max(0.0, Math.min(18.0, litersPerHour));
 
-    const fuelMassGps = mafGps / effectiveAfr;
-    let litersPerHour = (fuelMassGps * 3600.0) / DIESEL_DENSITY_G_PER_L;
-
-    // 1.4 D-4D motorun fiziksel tavanı: Tam güçte (90 HP) maksimum 17.5 L/saat
-    litersPerHour = Math.max(0.35, Math.min(17.5, litersPerHour));
-
-    // 6. Hıza Göre Birim ve Değer Seçimi:
-    // 10 km/h ve üstü hızlarda L/100km, altında L/saat (düşük hız bölme sapmasını önler)
+    // 5. Hıza Göre Birim ve Değer Seçimi:
     if (safeSpeed >= 10.0) {
       const lPer100km = (litersPerHour / safeSpeed) * 100.0;
-      // 1.4 D-4D için fiziksel anlık tavan sınırı 22.0 L/100km'dir
-      const boundedL100km = Math.min(22.0, Math.round(lPer100km * 10) / 10);
+      const boundedL100km = Math.min(25.0, Math.round(lPer100km * 10) / 10);
       return [
         boundedL100km,
         "L/100km",
@@ -794,6 +793,7 @@ export class MobileObdBleService {
       ];
     }
   }
+
 
   public async queryBatteryVoltage(deviceId?: string): Promise<number | null> {
     const targetId = deviceId || this.connectedDeviceId;

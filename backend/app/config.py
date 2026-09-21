@@ -27,7 +27,15 @@ MOVING_POLL_INTERVAL_SECONDS = float(os.getenv("BLE_MOVING_POLL_INTERVAL", "0.15
 SLOW_PID_INTERVAL_SECONDS = float(os.getenv("BLE_SLOW_PID_INTERVAL", "5.0"))
 
 # Toyota 1.4 D-4D (1ND-TV) Dizel Motor ve Yakıt Parametreleri
-DIESEL_DENSITY_G_PER_L = float(os.getenv("DIESEL_DENSITY", "840.0"))  # Euro Diesel yoğunluğu ~840 g/L
-MIN_DIESEL_AFR = float(os.getenv("MIN_DIESEL_AFR", "21.0"))          # Tam gaz / duman sınırı (90 HP @ 3800 d/d)
-MAX_DIESEL_AFR = float(os.getenv("MAX_DIESEL_AFR", "78.0"))          # Sıcak rölanti / fakir dizel yanması
-CRUISE_DEFAULT_AFR = float(os.getenv("CRUISE_DEFAULT_AFR", "52.0"))  # Sabit seyir nominal AFR
+# 1. Dizel Yakıt Yoğunluğu: Euro Diesel için 840 g/L (0.840 g/cm³)
+DIESEL_DENSITY_G_PER_L = float(os.getenv("DIESEL_DENSITY", "840.0"))
+
+# 2. Dinamik AFR (Hava/Yakıt Oranı) Kalibrasyon Katsayıları:
+DIESEL_AFR_IDLE = float(os.getenv("DIESEL_AFR_IDLE", "38.0"))          # Rölanti / Çok Düşük Yük (Load <= 15%)
+DIESEL_AFR_CRUISE = float(os.getenv("DIESEL_AFR_CRUISE", "28.0"))      # Düşük / Sabit Seyir (15% < Load <= 35%)
+DIESEL_AFR_MID = float(os.getenv("DIESEL_AFR_MID", "22.0"))            # Orta Yük / Şehir İçi (35% < Load <= 65%)
+DIESEL_AFR_HIGH = float(os.getenv("DIESEL_AFR_HIGH", "17.5"))          # Yüksek Yük / Rampa / Hızlanma (Load > 65%): 17.5 - 18.0
+
+# 3. Motor Mekanik Parametreleri
+ENGINE_CYLINDERS = int(os.getenv("ENGINE_CYLINDERS", "4"))             # 1ND-TV 4 silindir
+ENGINE_DISPLACEMENT_L = float(os.getenv("ENGINE_DISPLACEMENT_L", "1.364"))
