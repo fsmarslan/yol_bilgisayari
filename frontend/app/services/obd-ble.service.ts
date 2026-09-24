@@ -26,6 +26,7 @@ export type TelemetryState = {
   map_kpa: number | null;
   distance_mil_on: number | null;
   turbo_boost_bar: number | null;
+  injection_volume_mm3: number | null;
   fuel_display: number | null;
   fuel_unit: string;
   fuel_rate_lph: number | null;
@@ -46,10 +47,10 @@ const STORAGE_KEY_LAST_DEVICE_NAME = "auradrive_last_ble_device_name";
 
 // 2006 Toyota Corolla 1.4 D-4D (1ND-TV) Parametreleri
 const DIESEL_DENSITY_G_PER_L = 840.0;
-const DIESEL_AFR_IDLE = 38.0;      // Rölanti / Çok Düşük Yük (Load <= 15%)
-const DIESEL_AFR_CRUISE = 28.0;    // Düşük / Sabit Seyir (15% < Load <= 35%)
-const DIESEL_AFR_MID = 22.0;       // Orta Yük / Şehir İçi (35% < Load <= 65%)
-const DIESEL_AFR_HIGH = 17.5;      // Yüksek Yük / Rampa / Hızlanma (Load > 65%): 17.5 - 18.0
+const DIESEL_AFR_IDLE = 40.0;      // Rölanti / Çok Düşük Yük (Load <= 15%)
+const DIESEL_AFR_CRUISE = 32.0;    // Düşük / Sabit Seyir (15% < Load <= 35%)
+const DIESEL_AFR_MID = 26.0;       // Orta Yük / Şehir İçi (35% < Load <= 65%)
+const DIESEL_AFR_HIGH = 20.5;      // Yüksek Yük / Rampa / Hızlanma (Load > 65%)
 
 // Yaygın OBD-II & Toyota Arıza Kodları Sözlüğü
 export const DTC_DATABASE: Record<string, { description: string; system: DtcItem["system"]; severity: DtcItem["severity"] }> = {
@@ -104,6 +105,10 @@ export class MobileObdBleService {
   private consecutiveErrors = 0;
   private lastSuccessTimestamp = 0;
   private directConnectAttempts = 0;
+  private currentHeader: string | null = null;
+  private mode21Supported: boolean | null = null;
+  private mode21FailCount = 0;
+  private lastMode21Retry = 0;
 
   private state: TelemetryState = {
     connected: false,
@@ -118,6 +123,7 @@ export class MobileObdBleService {
     map_kpa: null,
     distance_mil_on: null,
     turbo_boost_bar: null,
+    injection_volume_mm3: null,
     fuel_display: null,
     fuel_unit: "--",
     fuel_rate_lph: null,
@@ -503,6 +509,84 @@ export class MobileObdBleService {
       await this.sendCommand(deviceId, "ATSP0", 600);
       await this.sendCommand(deviceId, "0100", 2500);
     }
+
+    // Toyota ECU (Denso) 7E0 Header Ayarla (Mode 21 ve fiziksel ECU erişimi için)
+    await this.sendCommand(deviceId, "ATSH 7E0", 600);
+    this.currentHeader = "7E0";
+  }
+
+  private async queryMode21Injection(deviceId: string): Promise<number | null> {
+    try {
+      if (this.currentHeader !== "7E0") {
+        const hRes = await this.sendCommand(deviceId, "ATSH 7E0", 400);
+        if (hRes.includes("OK")) {
+          this.currentHeader = "7E0";
+        }
+      }
+      const raw = await this.sendCommand(deviceId, "2167", 600);
+      const payload = this.extractPayloadMode21(raw, "67", 2);
+      if (!payload) return null;
+      return this.parseInjectionVolume(payload);
+    } catch {
+      return null;
+    }
+  }
+
+  private extractPayloadMode21(rawText: string, pidHex: string, bytesNeeded = 2): number[] | null {
+    const normalized = rawText.toUpperCase().replace(/[^0-9A-F]/g, "");
+    const marker = `61${pidHex.toUpperCase()}`;
+    const pos = normalized.indexOf(marker);
+    if (pos === -1) return null;
+
+    const tail = normalized.slice(pos + marker.length);
+    if (tail.length < 2) return null;
+
+    const chunk = tail.slice(0, bytesNeeded * 2);
+    const bytes: number[] = [];
+    for (let i = 0; i < chunk.length; i += 2) {
+      bytes.push(parseInt(chunk.slice(i, i + 2), 16));
+    }
+    return bytes;
+  }
+
+  private parseInjectionVolume(data: number[]): number | null {
+    if (!data || data.length === 0) return null;
+    if (data.length >= 2) {
+      const val = ((data[0] * 256) + data[1]) / 100.0;
+      if (val >= 0.0 && val <= 150.0) {
+        return Math.round(val * 100) / 100;
+      }
+    }
+    const singleVal = data[0];
+    if (singleVal >= 0.0 && singleVal <= 150.0) {
+      return Math.round(singleVal * 100) / 100;
+    }
+    return null;
+  }
+
+  private async pollMode21IfNeeded(deviceId: string) {
+    const now = Date.now();
+    const shouldTry = (
+      this.mode21Supported !== false ||
+      (now - this.lastMode21Retry >= 15000)
+    );
+    if (!shouldTry) return;
+
+    const inj = await this.queryMode21Injection(deviceId);
+    if (inj !== null) {
+      this.state.injection_volume_mm3 = inj;
+      this.mode21Supported = true;
+      this.mode21FailCount = 0;
+    } else {
+      this.mode21FailCount++;
+      if (this.mode21FailCount >= 5) {
+        if (this.mode21Supported !== false) {
+          console.warn("[MobileObdBleService] Mode 21 (2167) yanıt vermedi, MAF fallback kullanılıyor.");
+        }
+        this.mode21Supported = false;
+        this.lastMode21Retry = now;
+      }
+    }
   }
 
   /**
@@ -530,10 +614,13 @@ export class MobileObdBleService {
 
     // 3. Dönen İkincil PID'ler (Her alt adımda biri sorgulanır)
     switch (tick) {
-      case 0:
-      case 3: {
-        const maf = await this.queryPid(deviceId, "0110", "10", this.parseMaf);
-        if (maf !== null) this.state.maf_gps = maf;
+      case 0: {
+        await this.pollMode21IfNeeded(deviceId);
+        // Mode 21 yanıt vermiyorsa hemen MAF'ı da al
+        if (this.state.injection_volume_mm3 === null) {
+          const maf = await this.queryPid(deviceId, "0110", "10", this.parseMaf);
+          if (maf !== null) this.state.maf_gps = maf;
+        }
         break;
       }
       case 1:
@@ -554,6 +641,14 @@ export class MobileObdBleService {
             0,
             Math.min(100, Math.round(((load - idleBase) / (100.0 - idleBase)) * 100.0)),
           );
+        }
+        break;
+      }
+      case 3: {
+        const maf = await this.queryPid(deviceId, "0110", "10", this.parseMaf);
+        if (maf !== null) this.state.maf_gps = maf;
+        if (this.mode21Supported) {
+          await this.pollMode21IfNeeded(deviceId);
         }
         break;
       }
@@ -590,6 +685,7 @@ export class MobileObdBleService {
       this.state.load_percent,
       this.state.rpm,
       this.state.throttle_percent,
+      this.state.injection_volume_mm3,
     );
 
     this.state.fuel_display = fuelDisplay;
@@ -703,7 +799,7 @@ export class MobileObdBleService {
    * Parametreler ve Fiziksel Sınırlar:
    * - Motor Hacmi: 1364 cc (1.364 L) Turbo Intercooler Common-Rail Dizel
    * - Dizel Yoğunluğu: 840 g/L (Euro Dizel @ 15°C)
-   * - Dinamik AFR: Yüke bağlı (38.0 / 28.0 / 22.0 / 17.5)
+   * - Dinamik AFR: Yüke bağlı (40.0 / 32.0 / 26.0 / 20.5)
    * - DFCO: Speed > 20 km/h, RPM > 1200, (Throttle < 2% veya Load < 8%) -> 0.0 L/h
    * - Mode 21 Enjektör Hacmi: Varsa öncelikli tüketim formülü
    * - Gerçek Rölanti Tüketimi: Sıcak motorda 0.50 - 0.70 L/saat

@@ -33,10 +33,10 @@ logger = logging.getLogger("ble_service")
 def calculate_diesel_afr(load_percent: Optional[float]) -> float:
     """
     2006 Toyota Corolla 1.4 D-4D (1ND-TV) Dinamik AFR (Hava/Yakıt Oranı) Eğrisi:
-    - Rölanti / Çok Düşük Yük (Load <= 15%): AFR = 38.0
-    - Düşük / Sabit Hızda Akma (15% < Load <= 35%): AFR = 28.0
-    - Orta Yük / Şehir İçi (35% < Load <= 65%): AFR = 22.0
-    - Yüksek Yük / Rampa / Hızlanma (Load > 65%): AFR = 17.5 - 18.0 (Varsayılan: 17.5)
+    - Rölanti / Çok Düşük Yük (Load <= 15%): AFR = 40.0
+    - Düşük / Sabit Hızda Akma (15% < Load <= 35%): AFR = 32.0
+    - Orta Yük / Şehir İçi (35% < Load <= 65%): AFR = 26.0
+    - Yüksek Yük / Rampa / Hızlanma (Load > 65%): AFR = 20.5
     """
     if load_percent is None:
         return DIESEL_AFR_CRUISE
@@ -110,7 +110,7 @@ def calculate_diesel_fuel(
     """
     2006 Toyota Corolla 1.4 D-4D (1ND-TV, 90 HP, 190 Nm) Hassas Dizel Yakıt Modeli:
     1. Dizel yoğunluğu: 840 g/L sabit.
-    2. Dinamik AFR: Yüke bağlı (38.0 / 28.0 / 22.0 / 17.5).
+    2. Dinamik AFR: Yüke bağlı (40.0 / 32.0 / 26.0 / 20.5).
     3. DFCO: Speed > 20 km/h, RPM > 1200, (Throttle < 2% veya Load < 8%) -> 0.0 L/h.
     4. Enjektör verisi (Mode 21): Varsa öncelikli tüketim kaynağı.
     5. Sıcak rölantide 0.5 - 0.7 L/h bandı korunur.
@@ -194,6 +194,8 @@ class BleTelemetryManager:
         # Mode 21 Enjektör Hacmi desteği takibi
         self._mode21_supported: Optional[bool] = None
         self._mode21_fail_count: int = 0
+        self._last_mode21_retry: float = 0.0
+        self._current_header: Optional[str] = None
 
         # Yavaş PID sorgulama zamanlayıcısı
         self._last_slow_poll_time: float = 0.0
@@ -306,7 +308,7 @@ class BleTelemetryManager:
                 speed = 0.0
                 osc = (cycle_pos % 2.0) / 2.0
                 rpm = 820.0 + (15.0 * osc)
-                load = 13.5 + (1.0 * osc)  # Rölanti yükü (Load <= 15% -> AFR = 38.0)
+                load = 13.5 + (1.0 * osc)  # Rölanti yükü (Load <= 15% -> AFR = 40.0)
                 throttle = 0.0
                 boost = 0.0
                 maf = 4.8 + (0.2 * osc)
@@ -464,7 +466,7 @@ class BleTelemetryManager:
         return "".join(chunks)
 
     async def _initialize_adapter(self, client: BleakClient) -> None:
-        init_commands = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP5"]
+        init_commands = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP5", "ATSH 7E0"]
         for cmd in init_commands:
             response = await self._send_command(client, cmd)
             if "?" in response:
@@ -473,6 +475,7 @@ class BleTelemetryManager:
                 await asyncio.sleep(0.8)
             else:
                 await asyncio.sleep(0.05)
+        self._current_header = "7E0"
 
     async def _poll_once(self, client: BleakClient) -> Optional[float]:
         now_time = asyncio.get_running_loop().time()
@@ -522,16 +525,22 @@ class BleTelemetryManager:
 
         # Mode 21 Toyota Enjektör Hacmi (Injection Volume) sorgusu (Opsiyonel / Fallback: MAF)
         injection_volume = None
-        if self._mode21_supported is not False:
+        should_query_mode21 = (
+            self._mode21_supported is not False
+            or (now_time - self._last_mode21_retry >= 15.0)
+        )
+        if should_query_mode21:
             injection_volume = await self._query_mode21_injection(client)
             if injection_volume is not None:
                 self._mode21_supported = True
                 self._mode21_fail_count = 0
             else:
                 self._mode21_fail_count += 1
-                if self._mode21_fail_count >= 3:
-                    logger.info("Mode 21 (Enjektör Hacmi) ECU tarafından desteklenmiyor, MAF tabanlı dinamik AFR hesaplamasına devam ediliyor.")
+                if self._mode21_fail_count >= 5:
+                    if self._mode21_supported is not False:
+                        logger.info("Mode 21 (Enjektör Hacmi) ECU tarafından desteklenmiyor, MAF tabanlı dinamik AFR hesaplamasına devam ediliyor.")
                     self._mode21_supported = False
+                    self._last_mode21_retry = now_time
 
         # Toyota 1.4 D-4D Dizel Akıllı Anlık Tüketim Hesabı
         fuel_display, fuel_unit, fuel_rate_lph = self._calculate_diesel_fuel(
@@ -702,8 +711,12 @@ class BleTelemetryManager:
         """
         Toyota Denso Mode 21 Enjektör Hacmi (Injection Volume) Sorgusu (PID 2167).
         Format: 2167 -> 61 67 AA BB (mm3/strok)
+        ELM327 7E0 header ile fiziksel ECU'ya sorgu atılır.
         """
         try:
+            if self._current_header != "7E0":
+                await self._send_command(client, "ATSH 7E0")
+                self._current_header = "7E0"
             raw = await self._send_command(client, "2167")
             payload = self._extract_payload_mode21(raw, "67", bytes_needed=2)
             if payload is not None:
@@ -720,9 +733,9 @@ class BleTelemetryManager:
         if pos == -1:
             return None
         tail = normalized[pos + len(marker):]
-        chunk = tail[: bytes_needed * 2]
-        if len(chunk) < bytes_needed * 2:
+        if len(tail) < 2:
             return None
+        chunk = tail[: bytes_needed * 2]
         try:
             return [int(chunk[i : i + 2], 16) for i in range(0, len(chunk), 2)]
         except ValueError:

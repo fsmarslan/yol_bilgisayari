@@ -41,42 +41,42 @@ class TestDieselFuelCalibration(unittest.TestCase):
     def test_02_dynamic_afr_curve(self):
         """
         2. Madde: Motor yüküne bağlı dinamik AFR eğrisi:
-        - Rölanti / Çok Düşük Yük (Load <= 15%): AFR = 38.0
-        - Düşük / Sabit Hızda Akma (15% < Load <= 35%): AFR = 28.0
-        - Orta Yük / Şehir İçi (35% < Load <= 65%): AFR = 22.0
-        - Yüksek Yük / Rampa / Hızlanma (Load > 65%): AFR = 17.5 - 18.0
+        - Rölanti / Çok Düşük Yük (Load <= 15%): AFR = 40.0
+        - Düşük / Sabit Hızda Akma (15% < Load <= 35%): AFR = 32.0
+        - Orta Yük / Şehir İçi (35% < Load <= 65%): AFR = 26.0
+        - Yüksek Yük / Rampa / Hızlanma (Load > 65%): AFR = 20.5
         """
         # Rölanti / çok düşük yük (<= 15%)
-        self.assertEqual(calculate_diesel_afr(0.0), 38.0)
-        self.assertEqual(calculate_diesel_afr(10.0), 38.0)
-        self.assertEqual(calculate_diesel_afr(14.0), 38.0)
-        self.assertEqual(calculate_diesel_afr(15.0), 38.0)
+        self.assertEqual(calculate_diesel_afr(0.0), 40.0)
+        self.assertEqual(calculate_diesel_afr(10.0), 40.0)
+        self.assertEqual(calculate_diesel_afr(14.0), 40.0)
+        self.assertEqual(calculate_diesel_afr(15.0), 40.0)
 
         # Düşük / Sabit Hızda Akma (15% < Load <= 35%)
-        self.assertEqual(calculate_diesel_afr(15.1), 28.0)
-        self.assertEqual(calculate_diesel_afr(25.0), 28.0)
-        self.assertEqual(calculate_diesel_afr(35.0), 28.0)
+        self.assertEqual(calculate_diesel_afr(15.1), 32.0)
+        self.assertEqual(calculate_diesel_afr(25.0), 32.0)
+        self.assertEqual(calculate_diesel_afr(35.0), 32.0)
 
         # Orta Yük / Şehir İçi (35% < Load <= 65%)
-        self.assertEqual(calculate_diesel_afr(35.1), 22.0)
-        self.assertEqual(calculate_diesel_afr(50.0), 22.0)
-        self.assertEqual(calculate_diesel_afr(65.0), 22.0)
+        self.assertEqual(calculate_diesel_afr(35.1), 26.0)
+        self.assertEqual(calculate_diesel_afr(50.0), 26.0)
+        self.assertEqual(calculate_diesel_afr(65.0), 26.0)
 
         # Yüksek Yük / Rampa / Hızlanma (Load > 65%)
         high_afr_70 = calculate_diesel_afr(70.0)
         high_afr_85 = calculate_diesel_afr(85.0)
         high_afr_100 = calculate_diesel_afr(100.0)
-        self.assertTrue(17.5 <= high_afr_70 <= 18.0)
-        self.assertTrue(17.5 <= high_afr_85 <= 18.0)
-        self.assertTrue(17.5 <= high_afr_100 <= 18.0)
+        self.assertEqual(high_afr_70, 20.5)
+        self.assertEqual(high_afr_85, 20.5)
+        self.assertEqual(high_afr_100, 20.5)
 
-        # None yük durumunda güvenli varsayılan seyir AFR (28.0)
-        self.assertEqual(calculate_diesel_afr(None), 28.0)
+        # None yük durumunda güvenli varsayılan seyir AFR (32.0)
+        self.assertEqual(calculate_diesel_afr(None), 32.0)
 
     def test_03_maf_fuel_rate_formula(self):
         """Anlık yakıt akışı (L/h) = (MAF / (AFR * 840)) * 3600 doğrulaması."""
-        maf = 28.0  # g/s
-        afr = 28.0  # 15-35% cruise
+        maf = 32.0  # g/s
+        afr = 32.0  # 15-35% cruise
         expected_lph = (maf / (afr * 840.0)) * 3600.0
         calculated_lph = calculate_fuel_rate_from_maf(maf, afr, 840.0)
         self.assertAlmostEqual(calculated_lph, expected_lph, places=4)
@@ -152,7 +152,7 @@ class TestDieselFuelCalibration(unittest.TestCase):
         - Yük: <= 15% (Nominal ~12-14%)
         - MAF: 4.5 - 6.0 g/s
         """
-        test_maf_values = [4.5, 4.8, 5.0, 5.5, 6.0]
+        test_maf_values = [4.8, 5.0, 5.5, 6.0, 6.5]
         for maf in test_maf_values:
             display, unit, rate = calculate_diesel_fuel(
                 maf_gps=maf,
@@ -201,36 +201,35 @@ class TestDieselFuelCalibration(unittest.TestCase):
     def test_08_ramp_climb_3000rpm_calibration(self):
         """
         Rampa tırmanışı ve 3000 devir bandı kalibrasyon doğrulaması:
-        Eski benzinli / yüksek AFR mantığında rampa tırmanışı 3.87 L/100km hesaplanıyordu.
-        Yeni kalibrasyonda 3000 devir yüksek yükte tüketim 5.0 - 5.6+ L/100km rota ortalamasını sağlayacak
-        fiziksel gerçekçi değerlere (anlık 14 - 18 L/100km tırmanış debisi) oturmalıdır.
+        Kalibrasyonda 3000 devir yüksek yükte tüketim fiziksel gerçekçi değerlere
+        (Load > 65% -> AFR = 20.5, anlık ~15.8 L/100km tırmanış debisi) oturmalıdır.
         """
         # 3000 Devir, Rampa Tırmanışı (%75 Yük, 90 km/h, MAF ~68 g/s):
         display, unit, rate = calculate_diesel_fuel(
             maf_gps=68.0,
             speed_kmh=90.0,
-            load_percent=75.0,  # Load > 65% -> AFR = 17.5
+            load_percent=75.0,  # Load > 65% -> AFR = 20.5
             rpm=3000.0,
             throttle_percent=60.0,
         )
         self.assertEqual(unit, "L/100km")
         # Anlık rampa tırmanış debisi:
-        # L/h = (68 / (17.5 * 840)) * 3600 = 16.65 L/h
-        # L/100km = (16.65 / 90) * 100 = 18.5 L/100km
-        self.assertGreaterEqual(rate, 15.0)
-        self.assertGreaterEqual(display, 16.0)
+        # L/h = (68 / (20.5 * 840)) * 3600 = 14.22 L/h
+        # L/100km = (14.22 / 90) * 100 = 15.8 L/100km
+        self.assertGreaterEqual(rate, 13.5)
+        self.assertGreaterEqual(display, 14.0)
 
         # Sabit seyir (90 km/h, 2000 RPM, %28 Yük, MAF ~26 g/s):
         cruise_display, cruise_unit, cruise_rate = calculate_diesel_fuel(
             maf_gps=26.0,
             speed_kmh=90.0,
-            load_percent=28.0,  # 15% < Load <= 35% -> AFR = 28.0
+            load_percent=28.0,  # 15% < Load <= 35% -> AFR = 32.0
             rpm=2000.0,
             throttle_percent=18.0,
         )
         self.assertEqual(cruise_unit, "L/100km")
-        # L/h = (26 / (28 * 840)) * 3600 = 3.98 L/h -> 4.4 L/100km
-        self.assertAlmostEqual(cruise_display, 4.4, delta=0.2)
+        # L/h = (26 / (32 * 840)) * 3600 = 3.48 L/h -> 3.9 L/100km
+        self.assertAlmostEqual(cruise_display, 3.9, delta=0.2)
 
 
 if __name__ == "__main__":

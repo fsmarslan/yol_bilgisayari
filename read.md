@@ -22,11 +22,11 @@
 ### 1. 🛢️ Kalibre Edilmiş 1ND-TV Dizel Yakıt Modeli & Dinamik AFR Haritası
 Dizel motorlar benzinli motorların sabit 14.7:1 hava/yakıt oranı (AFR) mantığıyla çalışmaz; gaz kelebeği olmadan daima aşırı hava fazlalığıyla yanar. AuraDrive Pro, 1.4 D-4D motorun gerçek yanma karakteristiğine göre sıfırdan kalibre edilmiştir:
 - **Euro Dizel Yoğunluğu:** Standart benzin katsayıları yerine tam **`840.0 g/L` (0.840 g/cm³)** kullanılır.
-- **Motor Yüküne Göre Dinamik AFR Haritası:**
-  * **Rölanti / Çok Düşük Yük ($\text{Load} \le 15\%$):** $\text{AFR} = 38.0$ $\rightarrow$ Sıcak motorda **$0.50 - 0.70\text{ L/h}$** fabrika bandı.
-  * **Düşük Yük / Sabit Seyir ($15\% < \text{Load} \le 35\%$):** $\text{AFR} = 28.0$ $\rightarrow$ 90 km/h otoyolda **$4.2 - 4.5\text{ L/100km}$**.
-  * **Orta Yük / Şehir İçi Hızlanma ($35\% < \text{Load} \le 65\%$):** $\text{AFR} = 22.0$.
-  * **Yüksek Yük / Rampa Tırmanışı / Dip Gaz ($\text{Load} > 65\%$):** $\text{AFR} = 17.5 - 18.0$ (Duman sınırı ve 90 HP tepe noktası). Rampa ve 3000 d/d sürüşlerinde rota tüketimini gerçekçi **$5.0 - 5.6\text{ L/100km}$** aralığına yerleştirir.
+- **Motor Yüküne Göre Dinamik AFR Haritası (Yumuşatılmış Dizel Eğrisi):**
+  * **Rölanti / Çok Düşük Yük ($\text{Load} \le 15\%$):** $\text{AFR} = 40.0$ $\rightarrow$ Sıcak motorda **$0.50 - 0.70\text{ L/h}$** fabrika bandı.
+  * **Düşük Yük / Sabit Seyir ($15\% < \text{Load} \le 35\%$):** $\text{AFR} = 32.0$ $\rightarrow$ 90 km/h otoyolda **$3.8 - 4.2\text{ L/100km}$**.
+  * **Orta Yük / Şehir İçi Hızlanma ($35\% < \text{Load} \le 65\%$):** $\text{AFR} = 26.0$.
+  * **Yüksek Yük / Rampa Tırmanışı / Dip Gaz ($\text{Load} > 65\%$):** $\text{AFR} = 20.5$. Rampa ve 3000 d/d sürüşlerinde rota tüketimini fabrika yol bilgisayarı karakteristiğiyle birebir örtüştürür.
 - **Anlık Yakıt Akışı Formülü:**
   $$\text{Yakıt (L/h)} = \left(\frac{\text{MAF}}{\text{AFR} \times 840}\right) \times 3600$$
 - **Denso ECU 0xFF (%100) Rölanti Yük Filtresi:** Toyota Denso motor beyinlerinde araç dururken zaman zaman gelen hatalı %100 yük verisi filtrelenerek rölanti baz yüküne çekilir.
@@ -39,9 +39,9 @@ Dizel motorlar benzinli motorların sabit 14.7:1 hava/yakıt oranı (AFR) mantı
 
 ---
 
-### 3. 💉 Toyota Mode 21 Enjektör Hacmi Desteği (Öncelikli / Fallback)
-- Toyota Denso ECU'larda gelişmiş teşhis servisi (Mode 21 PID `2167`) üzerinden enjektör püskürtme hacmi ($\text{mm}^3/\text{strok}$) sorgulanır.
-- Okunabildiği sürece MAF yerine doğrudan hassas enjektör formülü öncelikli tüketim kaynağı olarak çalışır:
+### 3. 💉 Toyota Mode 21 Enjektör Hacmi Desteği (7E0 Header Öncelikli / Fallback)
+- Toyota Denso ECU'larda ELM327 üzerinden `7E0` fiziksel CAN header ayarlanarak gelişmiş teşhis servisi (Mode 21 PID `2167`) ile enjektör püskürtme hacmi ($\text{mm}^3/\text{strok}$) sorgulanır.
+- Okunabildiği sürece MAF yerine doğrudan hassas enjektör formülü birincil tüketim kaynağı olarak çalışır:
   $$\text{Yakıt (L/h)} = \frac{\text{Enjektör Hacmi (mm}^3\text{)} \times \text{RPM} \times 4 \times 60}{2 \times 1\,000\,000}$$
 - ECU yanıt vermediği durumlarda kesinti olmadan MAF tabanlı dinamik AFR hesaplamasına otomatik geri dönülür (fallback).
 

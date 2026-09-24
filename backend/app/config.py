@@ -31,10 +31,10 @@ SLOW_PID_INTERVAL_SECONDS = float(os.getenv("BLE_SLOW_PID_INTERVAL", "5.0"))
 DIESEL_DENSITY_G_PER_L = float(os.getenv("DIESEL_DENSITY", "840.0"))
 
 # 2. Dinamik AFR (Hava/Yakıt Oranı) Kalibrasyon Katsayıları:
-DIESEL_AFR_IDLE = float(os.getenv("DIESEL_AFR_IDLE", "38.0"))          # Rölanti / Çok Düşük Yük (Load <= 15%)
-DIESEL_AFR_CRUISE = float(os.getenv("DIESEL_AFR_CRUISE", "28.0"))      # Düşük / Sabit Seyir (15% < Load <= 35%)
-DIESEL_AFR_MID = float(os.getenv("DIESEL_AFR_MID", "22.0"))            # Orta Yük / Şehir İçi (35% < Load <= 65%)
-DIESEL_AFR_HIGH = float(os.getenv("DIESEL_AFR_HIGH", "17.5"))          # Yüksek Yük / Rampa / Hızlanma (Load > 65%): 17.5 - 18.0
+DIESEL_AFR_IDLE = float(os.getenv("DIESEL_AFR_IDLE", "40.0"))          # Rölanti / Çok Düşük Yük (Load <= 15%)
+DIESEL_AFR_CRUISE = float(os.getenv("DIESEL_AFR_CRUISE", "32.0"))      # Düşük / Sabit Seyir (15% < Load <= 35%)
+DIESEL_AFR_MID = float(os.getenv("DIESEL_AFR_MID", "26.0"))            # Orta Yük / Şehir İçi (35% < Load <= 65%)
+DIESEL_AFR_HIGH = float(os.getenv("DIESEL_AFR_HIGH", "20.5"))          # Yüksek Yük / Rampa / Hızlanma (Load > 65%): 20.5
 
 # 3. Motor Mekanik Parametreleri
 ENGINE_CYLINDERS = int(os.getenv("ENGINE_CYLINDERS", "4"))             # 1ND-TV 4 silindir

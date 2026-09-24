@@ -55,6 +55,7 @@ type LiveData = {
   map_kpa: number | null;
   distance_mil_on: number | null;
   turbo_boost_bar: number | null;
+  injection_volume_mm3?: number | null;
   fuel_display: number | null;
   fuel_unit: string;
   fuel_rate_lph?: number | null;
